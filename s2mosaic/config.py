@@ -115,6 +115,8 @@ class MosaicRequest:
     min_observations: Optional[int] = None
     max_observations: Optional[int] = None
     include_observation_count: bool = False
+    include_scene_index: bool = False
+    return_scene_items: bool = False
     source: str = SOURCE_MPC
     additional_query: Optional[Dict[str, Any]] = None
     min_coverage_fraction: Optional[float] = None
@@ -186,6 +188,7 @@ class MosaicRequest:
             min_coverage_fraction=self.min_coverage_fraction,
             source=self.source,
             include_observation_count=self.include_observation_count,
+            include_scene_index=self.include_scene_index,
         )
 
 
@@ -239,6 +242,7 @@ def validate_inputs(
     min_coverage_fraction: Optional[float] = None,
     source: str = SOURCE_MPC,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> None:
     from pyproj import CRS as PyprojCRS
 
@@ -340,6 +344,15 @@ def validate_inputs(
     if not isinstance(include_observation_count, bool):
         raise ValueError(
             f"include_observation_count must be a bool, got {include_observation_count}"
+        )
+    if not isinstance(include_scene_index, bool):
+        raise ValueError(
+            f"include_scene_index must be a bool, got {include_scene_index}"
+        )
+    if include_scene_index and mosaic_method not in (MOSAIC_MEDOID, MOSAIC_FIRST):
+        raise ValueError(
+            "include_scene_index is only supported with mosaic_method='medoid' "
+            f"or 'first'; got {mosaic_method}"
         )
     for band in bands:
         if band not in VALID_BANDS:

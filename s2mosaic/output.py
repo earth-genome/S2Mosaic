@@ -391,19 +391,36 @@ def finalize_output(
     coverage_mask: Optional[npt.NDArray[Any]],
     export_path: Optional[Path],
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Apply coverage mask, set band names + nodata, export or return.
 
     ``include_observation_count`` tells the output metadata that ``array`` has
-    an extra final per-pixel observation-count band.
+    an extra final per-pixel observation-count band. ``include_scene_index``
+    appends a per-pixel chosen-scene-index band (-1 = no candidate) after any
+    observation-count band.
     """
     if coverage_mask is not None:
         coverage = np.asarray(coverage_mask, dtype=bool)
-        np.multiply(array, coverage[None, :, :], out=array)
+        if include_scene_index:
+            # The scene-index band carries -1 outside coverage as a sentinel,
+            # so masking by multiply would turn it into 0 (a valid scene
+            # index). Multiply only the spectral + obs-count slice.
+            n_top = array.shape[0] - 1
+            np.multiply(
+                array[:n_top], coverage[None, :, :], out=array[:n_top]
+            )
+            # Also force the scene-index band to -1 outside coverage in case
+            # tile workers wrote zeros into uncovered pixels.
+            array[-1] = np.where(coverage, array[-1], -1)
+        else:
+            np.multiply(array, coverage[None, :, :], out=array)
 
     band_descriptions, nodata_value = output_band_metadata(bands)
     if include_observation_count:
         band_descriptions = [*band_descriptions, "Observation count"]
+    if include_scene_index:
+        band_descriptions = [*band_descriptions, "Scene index"]
 
     if export_path is not None:
         logger.info(f"Writing GeoTIFF to {export_path}")

@@ -72,14 +72,23 @@ def _empty_output_tile(
     bands_count: int,
     out_dtype: "np.dtype[Any]",
     include_observation_count: bool,
+    include_scene_index: bool = False,
 ) -> npt.NDArray[Any]:
-    dtype = (
-        np.promote_types(out_dtype, np.dtype(np.uint16))
-        if include_observation_count
-        else out_dtype
+    # The scene-index band is signed int32 (range covers -1 sentinel and
+    # any plausible scene count). Promote the tile dtype so the appended
+    # band can encode -1 without underflow on unsigned spectral types.
+    dtype: np.dtype[Any] = out_dtype
+    if include_observation_count:
+        dtype = np.promote_types(dtype, np.dtype(np.uint16))
+    if include_scene_index:
+        dtype = np.promote_types(dtype, np.dtype(np.int32))
+    count = bands_count + (1 if include_observation_count else 0) + (
+        1 if include_scene_index else 0
     )
-    count = bands_count + (1 if include_observation_count else 0)
-    return _empty_tile(spec, count, dtype)
+    out = np.zeros((count, spec[2], spec[3]), dtype=dtype)
+    if include_scene_index:
+        out[-1] = -1
+    return out
 
 
 def _read_scene_bands(
@@ -126,6 +135,25 @@ def _append_observation_count(
     out = np.empty((tile_data.shape[0] + 1, *tile_data.shape[1:]), dtype=out_dtype)
     out[: tile_data.shape[0]] = tile_data.astype(out_dtype, copy=False)
     out[-1] = count.astype(out_dtype, copy=False)
+    return out
+
+
+def _append_scene_index(
+    tile_data: npt.NDArray[Any],
+    scene_index_band: npt.NDArray[Any],
+) -> npt.NDArray[Any]:
+    """Append an int32 per-pixel scene-index band to a tile result.
+
+    The scene index encodes the source scene chosen for each pixel under
+    methods that pick a single scene (``medoid``, ``first``, single-scene
+    shortcut). ``-1`` is the no-data sentinel. The tile dtype is promoted
+    to ``int32`` so the sentinel round-trips through unsigned spectral
+    output buffers.
+    """
+    out_dtype = np.promote_types(tile_data.dtype, np.dtype(np.int32))
+    out = np.empty((tile_data.shape[0] + 1, *tile_data.shape[1:]), dtype=out_dtype)
+    out[: tile_data.shape[0]] = tile_data.astype(out_dtype, copy=False)
+    out[-1] = scene_index_band.astype(out_dtype, copy=False)
     return out
 
 
@@ -226,7 +254,7 @@ def _warm_nanquantile_axis0() -> None:
 def _medoid_axis0_u16(
     stack: npt.NDArray[np.uint16],
     valid: npt.NDArray[np.bool_],
-) -> Tuple[npt.NDArray[np.uint16], npt.NDArray[np.bool_]]:
+) -> Tuple[npt.NDArray[np.uint16], npt.NDArray[np.bool_], npt.NDArray[np.int32]]:
     """Per-pixel medoid composite over uint16 scene stack.
 
     For each pixel, picks the scene whose multi-band spectrum is closest
@@ -288,6 +316,11 @@ def _medoid_axis0_u16(
 
     out = np.zeros((n_bands, h, w), dtype=np.uint16)
     out_valid = np.zeros((h, w), dtype=np.bool_)
+    # Per-pixel chosen-scene index, accumulated across stripes. ``-1`` is the
+    # sentinel for "no candidate". The kernel already computes this internally
+    # for the value-copy step; we just propagate it out so callers can build
+    # provenance products (PIXEL_MAP) without recomputing.
+    out_idx = np.full((h, w), -1, dtype=np.int32)
     values = np.empty(n_scenes, dtype=np.uint16)
 
     for y0 in range(0, h, MEDOID_STRIPE_HEIGHT):
@@ -351,10 +384,11 @@ def _medoid_axis0_u16(
                 s = best_idx[yy, x]
                 if s >= 0:
                     out_valid[y, x] = True
+                    out_idx[y, x] = s
                     for b in range(n_bands):
                         out[b, y, x] = stack[s, b, y, x]
 
-    return out, out_valid
+    return out, out_valid, out_idx
 
 
 def _warm_medoid_axis0_u16() -> None:
@@ -363,7 +397,7 @@ def _warm_medoid_axis0_u16() -> None:
     sample_stack[0, 0, 0, 0] = 100
     sample_stack[1, 0, 0, 0] = 200
     sample_valid = np.ones((2, 1, 1), dtype=np.bool_)
-    _medoid_axis0_u16(sample_stack, sample_valid)
+    _, _, _ = _medoid_axis0_u16(sample_stack, sample_valid)
 
 
 def _copy_single_scene_tile(
@@ -376,13 +410,27 @@ def _copy_single_scene_tile(
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> npt.NDArray[Any]:
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
+
+    def _maybe_append_idx(
+        tile: npt.NDArray[Any], pick_mask: npt.NDArray[Any]
+    ) -> npt.NDArray[Any]:
+        if not include_scene_index:
+            return tile
+        idx_band = np.full((h, w), -1, dtype=np.int32)
+        if pick_mask.any():
+            idx_band[pick_mask] = np.int32(scene_idx)
+        return _append_scene_index(tile, idx_band)
+
     out = np.zeros((bands_count, h, w), dtype=out_dtype)
     pick = mask_tile & tile_coverage
     if not pick.any():
-        return out
+        if include_observation_count:
+            out = _append_observation_count(out, np.zeros((h, w), dtype=np.uint16))
+        return _maybe_append_idx(out, pick)
     band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec, band_executor)
     source_valid = _source_valid_from_bands(band_data)
     if source_valid is not None:
@@ -390,13 +438,13 @@ def _copy_single_scene_tile(
         if not pick.any():
             count = np.zeros((h, w), dtype=np.uint16)
             if include_observation_count:
-                return _append_observation_count(out, count)
-            return out
+                return _maybe_append_idx(_append_observation_count(out, count), pick)
+            return _maybe_append_idx(out, pick)
     for j, data in enumerate(band_data):
         np.copyto(out[j], data, where=pick, casting="unsafe")
     if include_observation_count:
-        return _append_observation_count(out, pick.astype(np.uint16))
-    return out
+        return _maybe_append_idx(_append_observation_count(out, pick.astype(np.uint16)), pick)
+    return _maybe_append_idx(out, pick)
 
 
 def _contributing_scene_indices(
@@ -567,12 +615,17 @@ def tile_medoid(
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
         return spec, _empty_output_tile(
-            spec, bands_count, out_dtype, include_observation_count
+            spec,
+            bands_count,
+            out_dtype,
+            include_observation_count,
+            include_scene_index,
         )
 
     if bands_count > 1 and (
@@ -588,7 +641,11 @@ def tile_medoid(
 
     if not contributing:
         return spec, _empty_output_tile(
-            spec, bands_count, out_dtype, include_observation_count
+            spec,
+            bands_count,
+            out_dtype,
+            include_observation_count,
+            include_scene_index,
         )
 
     if len(contributing) == 1:
@@ -607,6 +664,7 @@ def tile_medoid(
             out_dtype,
             band_executor,
             include_observation_count,
+            include_scene_index,
         )
 
     # Stack stays uint16 — medoid picks an actual observed spectrum so it
@@ -657,10 +715,20 @@ def tile_medoid(
         ):
             break
 
-    res, _ = _medoid_axis0_u16(stack, valid)
+    res, _, best_idx_local = _medoid_axis0_u16(stack, valid)
     tile = _finalise_tile(res, out_dtype)
     if include_observation_count:
         tile = _append_observation_count(tile, observation_count)
+    if include_scene_index:
+        # ``best_idx_local`` indexes into the local ``contributing`` slice; map
+        # back to the global scene list so callers can decode independently of
+        # which scenes ended up contributing to a given tile.
+        scene_idx_band = np.full((h, w), -1, dtype=np.int32)
+        valid_mask = best_idx_local >= 0
+        if valid_mask.any():
+            mapping = np.asarray(contributing, dtype=np.int32)
+            scene_idx_band[valid_mask] = mapping[best_idx_local[valid_mask]]
+        tile = _append_scene_index(tile, scene_idx_band)
     return spec, tile
 
 
@@ -935,6 +1003,7 @@ def run_tile_aggregation(
     show_progress: bool = False,
     min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
@@ -947,14 +1016,27 @@ def run_tile_aggregation(
     extra final band containing per-pixel valid-observation counts. The output
     dtype is promoted to at least ``uint16`` so visual RGB mosaics can carry
     counts above 255 without clipping.
+
+    When ``include_scene_index`` is true, an additional final band carries
+    the per-pixel chosen-scene index (-1 = no candidate). Output dtype is
+    promoted to at least ``int32`` to round-trip the sentinel.
     """
-    output_bands_count = bands_count + (1 if include_observation_count else 0)
-    output_dtype = (
-        np.promote_types(out_dtype, np.dtype(np.uint16))
-        if include_observation_count
-        else out_dtype
+    output_bands_count = (
+        bands_count
+        + (1 if include_observation_count else 0)
+        + (1 if include_scene_index else 0)
     )
+    output_dtype = out_dtype
+    if include_observation_count:
+        output_dtype = np.promote_types(output_dtype, np.dtype(np.uint16))
+    if include_scene_index:
+        output_dtype = np.promote_types(output_dtype, np.dtype(np.int32))
     out = np.zeros((output_bands_count, height, width), dtype=output_dtype)
+    if include_scene_index:
+        # Initialise the scene-index band to the no-data sentinel so tiles
+        # outside ``coverage_mask`` (which never get written) decode as -1
+        # rather than the spectral-band 0 fill.
+        out[-1] = -1
     for spec, tile_data in iter_tile_aggregation(
         masks=masks,
         read_fn=read_fn,
@@ -974,6 +1056,7 @@ def run_tile_aggregation(
         show_progress=show_progress,
         min_tile_size=min_tile_size,
         include_observation_count=include_observation_count,
+        include_scene_index=include_scene_index,
     ):
         r, c, h, w = spec
         out[:, r : r + h, c : c + w] = tile_data
@@ -1060,6 +1143,7 @@ def iter_tile_aggregation(
     show_progress: bool = False,
     min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
     """Yield aggregated output tiles without allocating the full mosaic.
 
@@ -1180,6 +1264,7 @@ def iter_tile_aggregation(
                 out_dtype,
                 band_executor,
                 include_observation_count,
+                include_scene_index,
             )
 
     else:

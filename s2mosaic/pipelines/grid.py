@@ -45,7 +45,11 @@ def run_grid_pipeline(
     request: MosaicRequest,
     *,
     source: Source,
-) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
+) -> Union[
+    Tuple[npt.NDArray[Any], Dict[str, Any]],
+    Tuple[npt.NDArray[Any], Dict[str, Any], List[Any]],
+    Path,
+]:
     """Grid-id mode pipeline. Called from mosaic() for full-MGRS mosaics."""
     bands = request.bands
     additional_query = request.additional_query
@@ -171,20 +175,34 @@ def run_grid_pipeline(
         adaptive_tiling=request.adaptive_tiling,
         show_progress=request.show_progress,
         include_observation_count=request.include_observation_count,
+        include_scene_index=request.include_scene_index,
     )
     sidecar_metadata["dropped_scenes"] = dropped_scenes
     if export_path is not None:
         write_output_sidecar(export_path, sidecar_metadata)
         return export_path
     assert mosaic is not None
-    return finalize_output(
+    finalized = finalize_output(
         array=mosaic,
         profile=profile,
         bands=bands,
         coverage_mask=output_coverage_mask,
         export_path=export_path,
         include_observation_count=request.include_observation_count,
+        include_scene_index=request.include_scene_index,
     )
+    if request.return_scene_items:
+        # ``sorted_items`` is a DataFrame with one row per scene in the order
+        # the aggregator iterated; ``include_scene_index`` band values
+        # reference row positions (-1 = no candidate). Extract the underlying
+        # pystac items so callers can build provenance keyed by scene ID.
+        from ..stac import ITEM_COL
+
+        scene_items = list(sorted_items[ITEM_COL].tolist())
+        assert isinstance(finalized, tuple)
+        arr, prof = finalized
+        return arr, prof, scene_items
+    return finalized
 
 
 def stream_mosaic_pipeline(
@@ -210,6 +228,7 @@ def stream_mosaic_pipeline(
     adaptive_tiling: bool = True,
     show_progress: bool = False,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any], List[Dict[str, str]]]:
     """Tile-streamed mosaic for grid_id mode.
 
@@ -393,12 +412,16 @@ def stream_mosaic_pipeline(
             tile_size,
         )
         out_dtype = np.dtype(np.uint8) if is_visual else np.dtype(np.uint16)
-        output_dtype = (
-            np.promote_types(out_dtype, np.dtype(np.uint16))
-            if include_observation_count
-            else out_dtype
+        output_dtype: np.dtype[Any] = out_dtype
+        if include_observation_count:
+            output_dtype = np.promote_types(output_dtype, np.dtype(np.uint16))
+        if include_scene_index:
+            output_dtype = np.promote_types(output_dtype, np.dtype(np.int32))
+        output_bands_count = (
+            bands_count
+            + (1 if include_observation_count else 0)
+            + (1 if include_scene_index else 0)
         )
-        output_bands_count = bands_count + (1 if include_observation_count else 0)
         last_profile["dtype"] = output_dtype
         last_profile["count"] = output_bands_count
 
@@ -459,6 +482,7 @@ def stream_mosaic_pipeline(
             show_progress=show_progress,
             min_tile_size=min_tile_size,
             include_observation_count=include_observation_count,
+            include_scene_index=include_scene_index,
         )
         return out, last_profile, dropped_scenes
     finally:

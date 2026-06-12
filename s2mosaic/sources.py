@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 SOURCE_MPC = "MPC"
 SOURCE_AWS = "AWS"
+SOURCE_AWS_C1 = "AWS_C1"
 
 
 def _identity_sign(href: str) -> str:
@@ -172,7 +173,54 @@ AWS = Source(
 )
 
 
-_SOURCES: Dict[str, Source] = {SOURCE_MPC: MPC, SOURCE_AWS: AWS}
+# Element 84 Earth Search v1 — ESA Collection-1 reprocessing of L2A. Unlike
+# the legacy ``sentinel-2-l2a`` collection (Element 84's original pipeline
+# which subtracted the +1000 BOA offset at COG creation), the c1 collection
+# preserves ESA's reflectance baseline including the +1000 offset. Asset
+# keys are canonical band IDs (``B01``..``B12``, ``SCL``); the MGRS query
+# uses the same split fields as the legacy AWS source.
+AWS_C1 = Source(
+    name=SOURCE_AWS_C1,
+    stac_url="https://earth-search.aws.element84.com/v1",
+    collection_id="sentinel-2-c1-l2a",
+    sign=_identity_sign,
+    band_assets={
+        "B01": "coastal",
+        "B02": "blue",
+        "B03": "green",
+        "B04": "red",
+        "B05": "rededge1",
+        "B06": "rededge2",
+        "B07": "rededge3",
+        "B08": "nir",
+        "B8A": "nir08",
+        "B09": "nir09",
+        "B11": "swir16",
+        "B12": "swir22",
+        "SCL": "scl",
+        # "visual" is the same key on both providers.
+    },
+    asset_block_sizes={
+        "B02": 1024,
+        "B03": 1024,
+        "B04": 1024,
+        "B08": 1024,
+        "visual": 1024,
+        "SCL": 512,
+    },
+    default_block_size=512,
+    _mgrs_query=_aws_mgrs_query,
+)
+
+
+_SOURCES: Dict[str, Source] = {
+    SOURCE_MPC: MPC,
+    SOURCE_AWS: AWS,
+    SOURCE_AWS_C1: AWS_C1,
+}
+# Convenience aliases so callers can use the friendlier names.
+_SOURCES["c1-l2a"] = AWS_C1
+_SOURCES["sentinel-2-c1-l2a"] = AWS_C1
 VALID_SOURCES = frozenset(_SOURCES)
 
 
