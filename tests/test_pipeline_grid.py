@@ -13,9 +13,12 @@ class TestGridOrderedMaskStreaming:
         href = "sample.tif"
 
     class FakeItem:
-        def __init__(self, scene_id):
+        def __init__(self, scene_id, assets=None):
             self.id = scene_id
-            self.assets = {"B04": TestGridOrderedMaskStreaming.FakeAsset()}
+            self.assets = assets or {
+                "B04": TestGridOrderedMaskStreaming.FakeAsset(),
+                "SCL": TestGridOrderedMaskStreaming.FakeAsset(),
+            }
 
     def _sorted_scenes(self, n_scenes):
         return pd.DataFrame(

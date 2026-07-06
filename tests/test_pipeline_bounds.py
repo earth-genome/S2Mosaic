@@ -143,6 +143,9 @@ class TestBoundsMaskResolution:
 
 
 class TestBoundsOcmContext:
+    class FakeAsset:
+        href = "https://example.com/fake.tif"
+
     class FakeItem:
         id = "fake-scene"
         datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
@@ -155,6 +158,12 @@ class TestBoundsOcmContext:
             "s2:high_proba_clouds_percentage": 0.0,
             "s2:cloud_shadow_percentage": 0.0,
             "sat:relative_orbit": 1,
+        }
+        assets = {
+            "B04": object(),
+            "B03": object(),
+            "B8A": object(),
+            "SCL": object(),
         }
 
     def test_small_bounds_expand_to_minimum_ocm_context(self):

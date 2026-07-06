@@ -10,6 +10,7 @@ from multiclean import clean_array
 from omnicloudmask import predict_from_array
 
 from .data_reader import get_full_band
+from .helpers import ensure_item_assets
 from .sources import Source
 
 # Sentinel-2 SCL band class values:
@@ -110,6 +111,7 @@ def get_scl_masks(
     accurate — relies on the L2A processor's published Scene Classification
     Layer rather than re-running cloud detection.
     """
+    ensure_item_assets(item, source, ["SCL"])
     href = item.assets[source.asset_name("SCL")].href
     arr, _ = get_full_band(
         href=href, source=source, res=user_resolution, asset_name="SCL"
@@ -128,6 +130,7 @@ def get_masks(
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
     ocm_bands = ["B04", "B03", "B8A"]
+    ensure_item_assets(item, source, ocm_bands)
 
     def get_band_at_ocm_res(
         band: str,

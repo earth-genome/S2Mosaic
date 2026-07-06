@@ -6,10 +6,18 @@ from rasterio.errors import RasterioIOError
 
 from s2mosaic.helpers import (
     SceneFetchError,
+    SceneMissingAssets,
+    ensure_item_assets,
+    filter_scene_dataframe,
+    missing_item_assets,
     normalize_grid_id,
+    partition_items_by_required_assets,
     report_dropped_scenes,
+    required_assets_for_mosaic,
     with_scene_retry,
 )
+from s2mosaic.sources import AWS
+from s2mosaic.stac import ITEM_COL
 
 
 class TestNormalizeGridId:
@@ -208,3 +216,67 @@ class TestReportDroppedScenes:
         text = buf.getvalue()
         assert "2/10 scenes dropped" in text
         assert "S2A_X" in text and "S2B_Y" in text
+
+
+class TestSceneAssetValidation:
+    class FakeAsset:
+        href = "sample.tif"
+
+    class FakeItem:
+        def __init__(self, scene_id, assets):
+            self.id = scene_id
+            self.assets = assets
+
+    def test_required_assets_for_ocm_includes_mask_bands(self):
+        required = required_assets_for_mosaic(["B04", "B08"], "OCM")
+        assert required == ["B03", "B04", "B08", "B8A"]
+
+    def test_missing_item_assets_reports_provider_keys(self):
+        item = self.FakeItem(
+            "S2C_T11VMD",
+            {"green": self.FakeAsset(), "nir08": self.FakeAsset()},
+        )
+        missing = missing_item_assets(item, AWS, ["B04", "B03", "B8A"])
+        assert missing == ["red"]
+
+    def test_partition_items_drops_incomplete_scenes(self):
+        good = self.FakeItem(
+            "good",
+            {
+                "red": self.FakeAsset(),
+                "green": self.FakeAsset(),
+                "nir08": self.FakeAsset(),
+                "B04": self.FakeAsset(),
+            },
+        )
+        bad = self.FakeItem("bad", {"green": self.FakeAsset()})
+        kept, dropped = partition_items_by_required_assets(
+            [good, bad], AWS, ["B04"], "OCM"
+        )
+        assert [item.id for item in kept] == ["good"]
+        assert dropped[0]["id"] == "bad"
+        assert "missing STAC assets" in dropped[0]["reason"]
+
+    def test_filter_scene_dataframe_removes_bad_rows(self):
+        good = self.FakeItem(
+            "good",
+            {
+                "red": self.FakeAsset(),
+                "green": self.FakeAsset(),
+                "nir08": self.FakeAsset(),
+                "B04": self.FakeAsset(),
+            },
+        )
+        bad = self.FakeItem("bad", {"green": self.FakeAsset()})
+        import pandas as pd
+
+        scenes = pd.DataFrame({ITEM_COL: [good, bad]})
+        filtered, dropped = filter_scene_dataframe(scenes, AWS, ["B04"], "OCM")
+        assert len(filtered) == 1
+        assert filtered.iloc[0][ITEM_COL].id == "good"
+        assert dropped[0]["id"] == "bad"
+
+    def test_ensure_item_assets_raises_scene_missing_assets(self):
+        item = self.FakeItem("bad", {"green": self.FakeAsset()})
+        with pytest.raises(SceneMissingAssets, match="missing STAC assets: red"):
+            ensure_item_assets(item, AWS, ["B04", "B03", "B8A"])

@@ -17,6 +17,7 @@ from ..helpers import (
     MGRS_TILE_SIZE_M,
     SceneFetchError,
     define_dates,
+    filter_scene_dataframe,
     get_band_template,
     pick_ocm_resolution,
     report_dropped_scenes,
@@ -151,6 +152,23 @@ def run_grid_pipeline(
         f"Sorted {len(sorted_items)} scenes using {request.scene_order} method."
     )
 
+    n_candidate_scenes = len(sorted_items)
+    sorted_items, asset_dropped = filter_scene_dataframe(
+        sorted_items, source, bands, request.cloud_mask
+    )
+    if asset_dropped:
+        logger.warning(
+            "Dropped %d/%d scenes with incomplete STAC assets before compositing",
+            len(asset_dropped),
+            n_candidate_scenes,
+        )
+        report_dropped_scenes(asset_dropped, total=n_candidate_scenes)
+    if len(sorted_items) == 0:
+        raise RuntimeError(
+            f"All {n_candidate_scenes} scenes missing required STAC assets — "
+            "no data to mosaic"
+        )
+
     output_coverage_mask = (
         coverage_mask if request.min_coverage_fraction is not None else None
     )
@@ -177,7 +195,7 @@ def run_grid_pipeline(
         include_observation_count=request.include_observation_count,
         include_scene_index=request.include_scene_index,
     )
-    sidecar_metadata["dropped_scenes"] = dropped_scenes
+    sidecar_metadata["dropped_scenes"] = asset_dropped + dropped_scenes
     if export_path is not None:
         write_output_sidecar(export_path, sidecar_metadata)
         return export_path

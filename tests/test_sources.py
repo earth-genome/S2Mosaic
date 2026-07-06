@@ -24,7 +24,8 @@ class TestSourceConstants:
     def test_valid_sources_contains_both(self):
         assert SOURCE_MPC in VALID_SOURCES
         assert SOURCE_AWS in VALID_SOURCES
-        assert len(VALID_SOURCES) == 2
+        assert "AWS_C1" in VALID_SOURCES
+        assert "c1-l2a" in VALID_SOURCES
 
     def test_get_source_returns_singleton(self):
         assert get_source(SOURCE_MPC) is MPC

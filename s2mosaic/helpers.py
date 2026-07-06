@@ -29,12 +29,18 @@ T = TypeVar("T")
 
 
 class SceneFetchError(Exception):
-    """Raised by a per-scene COG/asset fetch after all retries are exhausted.
+    """Raised when a per-scene step cannot proceed for a recoverable reason.
 
     Caught at the pipeline-loop level so one bad scene doesn't abort the whole
-    mosaic — the loop logs and skips. Errors that aren't fetch-related (e.g.
-    OCM inference failures) bypass this and propagate.
+    mosaic — the loop logs and skips. Subclasses cover exhausted fetch retries
+    (:class:`SceneMissingAssets`) and scenes with no footprint overlap
+    (:class:`SceneNoOverlap`). Errors that aren't scene-level recoverable (e.g.
+    OCM inference failures on otherwise-valid data) bypass this and propagate.
     """
+
+
+class SceneMissingAssets(SceneFetchError):
+    """Scene STAC item lacks assets required for cloud masking or compositing."""
 
 
 class SceneNoOverlap(SceneFetchError):
@@ -217,9 +223,105 @@ def get_rasterio_resampling(method: str) -> "Resampling":
 
 OCM_MIN_RESOLUTION = 20
 OCM_MAX_RESOLUTION = 50
+OCM_MASK_BANDS: Tuple[str, ...] = ("B04", "B03", "B8A")
 
 # MGRS tile is exactly 109800m on each side.
 MGRS_TILE_SIZE_M = 109800
+
+
+def missing_item_assets(
+    item: Any,
+    source: Any,
+    canonical_bands: List[str],
+) -> List[str]:
+    """Return provider STAC asset keys absent from ``item``."""
+    assets = getattr(item, "assets", None)
+    if assets is None:
+        return [source.asset_name(band) for band in canonical_bands]
+    missing: List[str] = []
+    for band in canonical_bands:
+        asset_key = source.asset_name(band)
+        if asset_key not in assets:
+            missing.append(asset_key)
+    return missing
+
+
+def required_assets_for_mosaic(bands: List[str], cloud_mask: str) -> List[str]:
+    """Canonical band/asset names that must exist on every composited scene."""
+    from .config import CLOUD_MASK_OCM, CLOUD_MASK_SCL
+
+    required = set(bands)
+    if cloud_mask == CLOUD_MASK_OCM:
+        required.update(OCM_MASK_BANDS)
+    elif cloud_mask == CLOUD_MASK_SCL:
+        required.add("SCL")
+    return sorted(required)
+
+
+def ensure_item_assets(
+    item: Any,
+    source: Any,
+    canonical_bands: List[str],
+) -> None:
+    """Raise :class:`SceneMissingAssets` when ``item`` lacks required assets."""
+    missing = missing_item_assets(item, source, canonical_bands)
+    if missing:
+        raise SceneMissingAssets(f"missing STAC assets: {', '.join(missing)}")
+
+
+def partition_items_by_required_assets(
+    items: List[Any],
+    source: Any,
+    bands: List[str],
+    cloud_mask: str,
+) -> Tuple[List[Any], List[Dict[str, str]]]:
+    """Drop scenes whose STAC items lack assets for ``bands`` / ``cloud_mask``."""
+    required = required_assets_for_mosaic(bands, cloud_mask)
+    kept: List[Any] = []
+    dropped: List[Dict[str, str]] = []
+    for item in items:
+        missing = missing_item_assets(item, source, required)
+        if missing:
+            dropped.append(
+                {
+                    "id": item.id,
+                    "reason": f"missing STAC assets: {', '.join(missing)}",
+                }
+            )
+        else:
+            kept.append(item)
+    return kept, dropped
+
+
+def filter_scene_dataframe(
+    scenes_df: Any,
+    source: Any,
+    bands: List[str],
+    cloud_mask: str,
+) -> Tuple[Any, List[Dict[str, str]]]:
+    """Return a scenes DataFrame with incomplete STAC items removed."""
+    import pandas as pd
+
+    from .stac import ITEM_COL
+
+    kept_rows = []
+    dropped: List[Dict[str, str]] = []
+    required = required_assets_for_mosaic(bands, cloud_mask)
+    for _, row in scenes_df.iterrows():
+        item = row[ITEM_COL]
+        missing = missing_item_assets(item, source, required)
+        if missing:
+            dropped.append(
+                {
+                    "id": item.id,
+                    "reason": f"missing STAC assets: {', '.join(missing)}",
+                }
+            )
+        else:
+            kept_rows.append(row)
+    if not kept_rows:
+        return scenes_df.iloc[0:0].copy(), dropped
+    return pd.DataFrame(kept_rows).reset_index(drop=True), dropped
 
 
 def pick_ocm_resolution(user_resolution: int) -> int:

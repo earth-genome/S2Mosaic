@@ -44,6 +44,7 @@ from ..helpers import (
     define_dates,
     get_band_template,
     get_rasterio_resampling,
+    partition_items_by_required_assets,
     pick_ocm_resolution,
     report_dropped_scenes,
     with_scene_retry,
@@ -737,6 +738,23 @@ def run_bounds_pipeline(
         scene_sort_fn=request.scene_sort_fn,
     )
 
+    n_candidate_scenes = len(items_list)
+    items_list, asset_dropped = partition_items_by_required_assets(
+        items_list, source, bands, request.cloud_mask
+    )
+    if asset_dropped:
+        logger.warning(
+            "Dropped %d/%d scenes with incomplete STAC assets before compositing",
+            len(asset_dropped),
+            n_candidate_scenes,
+        )
+        report_dropped_scenes(asset_dropped, total=n_candidate_scenes)
+    if not items_list:
+        raise RuntimeError(
+            f"All {n_candidate_scenes} scenes missing required STAC assets — "
+            "no data to mosaic"
+        )
+
     # Mask resolution depends on provider. OCM is fastest at coarser
     # resolutions, and SCL is native 20m, so avoid upsampling SCL to 10m
     # during the network-heavy mask scan.
@@ -814,7 +832,7 @@ def run_bounds_pipeline(
         scl_tile_specs=scl_tile_specs,
         show_progress=request.show_progress,
     )
-    sidecar_metadata["dropped_scenes"] = dropped_scenes
+    sidecar_metadata["dropped_scenes"] = asset_dropped + dropped_scenes
 
     # Prepare the user-resolution masks and target grid for tile aggregation.
     kept_indices = sorted(kept_combo_masks_ocm.keys())

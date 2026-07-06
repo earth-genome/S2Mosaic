@@ -1427,7 +1427,7 @@ class TestMedoidAxis0U16:
         )
         valid = np.ones((4, 1, 1), dtype=bool)
 
-        got, got_valid = _medoid_axis0_u16(stack, valid)
+        got, got_valid, _ = _medoid_axis0_u16(stack, valid)
 
         np.testing.assert_array_equal(got_valid, [[True]])
         np.testing.assert_array_equal(got[:, 0, 0], [0, 2])
@@ -1446,7 +1446,7 @@ class TestMedoidAxis0U16:
                 )
                 valid = rng.random((scenes, h, w)) < 0.75
 
-                got, got_valid = _medoid_axis0_u16(stack, valid)
+                got, got_valid, _ = _medoid_axis0_u16(stack, valid)
                 expected, expected_valid = self._reference_medoid(stack, valid)
 
                 np.testing.assert_array_equal(got_valid, expected_valid)

@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
+import pytest
 
+from s2mosaic.helpers import SceneMissingAssets
 from s2mosaic.masking import (
     SCL_CLOUDY_CLASSES,
     compute_masks_from_scl,
@@ -179,3 +181,14 @@ class TestMaskingHelpers:
         assert clear.shape == (3, 5)
         assert valid.shape == (3, 5)
         assert seen_assets == {"B04", "B03", "B8A"}
+
+    def test_get_masks_raises_when_ocm_band_missing(self):
+        class FakeItem:
+            assets = {"B03": object(), "B8A": object()}
+
+        class FakeSource:
+            def asset_name(self, canonical):
+                return canonical
+
+        with pytest.raises(SceneMissingAssets, match="missing STAC assets: B04"):
+            get_masks(FakeItem(), FakeSource())
