@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from ..aggregation import run_tile_aggregation, write_tile_aggregation_geotiff
 from ..streaming import iter_ordered_fetches
 from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest
+from ..masking import OcmTuning
 from ..frequent_coverage import get_frequent_coverage
 from ..helpers import (
     MGRS_TILE_SIZE_M,
@@ -183,6 +184,7 @@ def run_grid_pipeline(
         mosaic_method=request.mosaic_method,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
+        ocm_tuning=request.ocm_tuning,
         coverage_mask=coverage_mask,
         percentile=request.percentile,
         s2_scene_size=target_size,
@@ -235,6 +237,7 @@ def stream_mosaic_pipeline(
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "fp32",
+    ocm_tuning: Optional[OcmTuning] = None,
     max_dl_workers: int = 4,
     percentile: Optional[float] = 50.0,
     s2_scene_size: int = 10980,
@@ -296,6 +299,7 @@ def stream_mosaic_pipeline(
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
             ocm_resolution=ocm_resolution,
+            ocm_tuning=ocm_tuning,
             max_dl_workers=max_dl_workers,
             s2_scene_size=s2_scene_size,
             resolution=resolution,

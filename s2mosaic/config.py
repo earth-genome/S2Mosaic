@@ -10,6 +10,7 @@ from shapely.geometry.polygon import Polygon
 
 from .geometry import Aoi, Bbox
 from .helpers import normalize_grid_id
+from .masking import OcmTuning
 from .sources import SOURCE_MPC
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,7 @@ class MosaicRequest:
     cloud_mask: str = CLOUD_MASK_OCM
     ocm_batch_size: int = 1
     ocm_inference_dtype: str = "fp32"
+    ocm_tuning: Optional[OcmTuning] = None
     output_crs: Optional[int] = None
     resolution: int = 10
     resampling_method: str = "nearest"
@@ -190,6 +192,8 @@ class MosaicRequest:
             include_observation_count=self.include_observation_count,
             include_scene_index=self.include_scene_index,
         )
+        if self.ocm_tuning is not None:
+            self.ocm_tuning.validate()
 
 
 def normalize_mosaic_inputs(
