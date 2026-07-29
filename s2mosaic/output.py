@@ -97,8 +97,11 @@ def _jsonable(value: Any, _seen: Optional[set[int]] = None) -> Any:
     if _seen is None:
         _seen = set()
     value_id = id(value)
-    is_container = isinstance(value, (Mapping, tuple, list, BaseGeometry)) or callable(
-        value
+    is_dataclass_instance = is_dataclass(value) and not isinstance(value, type)
+    is_container = (
+        isinstance(value, (Mapping, tuple, list, BaseGeometry))
+        or is_dataclass_instance
+        or callable(value)
     )
     if is_container:
         if value_id in _seen:
@@ -111,6 +114,15 @@ def _jsonable(value: Any, _seen: Optional[set[int]] = None) -> Any:
             return mapping(value)
         if isinstance(value, np.generic):
             return value.item()
+        if is_dataclass_instance:
+            # Nested dataclass request options (e.g. OcmTuning) affect output,
+            # so hash their fields rather than failing on the instance. The
+            # type name is included so distinct option classes holding equal
+            # values hash differently.
+            descriptor: Dict[str, Any] = {"dataclass": type(value).__name__}
+            for field in sorted(fields(value), key=lambda f: f.name):
+                descriptor[field.name] = _jsonable(getattr(value, field.name), _seen)
+            return descriptor
         if isinstance(value, Mapping):
             return {str(k): _jsonable(v, _seen) for k, v in sorted(value.items())}
         if isinstance(value, tuple):
@@ -407,9 +419,7 @@ def finalize_output(
             # so masking by multiply would turn it into 0 (a valid scene
             # index). Multiply only the spectral + obs-count slice.
             n_top = array.shape[0] - 1
-            np.multiply(
-                array[:n_top], coverage[None, :, :], out=array[:n_top]
-            )
+            np.multiply(array[:n_top], coverage[None, :, :], out=array[:n_top])
             # Also force the scene-index band to -1 outside coverage in case
             # tile workers wrote zeros into uncovered pixels.
             array[-1] = np.where(coverage, array[-1], -1)

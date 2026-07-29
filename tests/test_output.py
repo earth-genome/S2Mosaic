@@ -8,6 +8,7 @@ import rasterio as rio
 from shapely.geometry import Polygon
 
 from s2mosaic.config import MosaicRequest
+from s2mosaic.masking import OcmTuning
 from s2mosaic.output import (
     _jsonable,
     _safe_token,
@@ -113,6 +114,44 @@ class TestExportPaths:
             end_date=end,
             source_name="MPC",
         )
+
+    def test_request_hash_handles_nested_dataclass_options(self):
+        start = date(2023, 6, 1)
+        end = date(2023, 6, 8)
+
+        def _request(**kwargs):
+            return MosaicRequest(
+                grid_id="50HMH",
+                start_year=2023,
+                duration_days=7,
+                bands=["B04"],
+                **kwargs,
+            ).normalized()
+
+        def _hash(request):
+            return output_request_hash(
+                request,
+                mode="grid",
+                start_date=start,
+                end_date=end,
+                source_name="MPC",
+            )
+
+        base = _hash(_request())
+        tuned = _hash(_request(ocm_tuning=OcmTuning(clear_threshold=0.6)))
+        stricter = _hash(_request(ocm_tuning=OcmTuning(clear_threshold=0.75)))
+
+        # Tuning changes the pixels, so it must change the output name.
+        assert base != tuned
+        assert tuned != stricter
+        # Equal tuning hashes stably across instances.
+        assert tuned == _hash(_request(ocm_tuning=OcmTuning(clear_threshold=0.6)))
+
+    def test_jsonable_expands_dataclass_fields(self):
+        encoded = _jsonable(OcmTuning(clear_threshold=0.6, cloud_dilation=2))
+        assert encoded["dataclass"] == "OcmTuning"
+        assert encoded["clear_threshold"] == 0.6
+        assert encoded["cloud_dilation"] == 2
 
     def test_request_hash_includes_observation_count_flag(self):
         start = date(2023, 6, 1)
