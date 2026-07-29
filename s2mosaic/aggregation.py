@@ -853,17 +853,25 @@ def tile_first(
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
     include_observation_count: bool = False,
+    include_scene_index: bool = False,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
         return spec, _empty_output_tile(
-            spec, bands_count, out_dtype, include_observation_count
+            spec,
+            bands_count,
+            out_dtype,
+            include_observation_count,
+            include_scene_index,
         )
     # FIRST copies source pixels straight through, so we can accumulate
     # directly in the output dtype — no float32 working buffer needed.
     result = np.zeros((bands_count, h, w), dtype=out_dtype)
     filled = np.zeros((h, w), dtype=bool)
+    scene_idx_band = (
+        np.full((h, w), -1, dtype=np.int32) if include_scene_index else None
+    )
     for scene_idx, m in enumerate(masks):
         if m is None:
             continue
@@ -881,11 +889,16 @@ def tile_first(
                 continue
         for j, data in enumerate(band_data):
             result[j][new_pixels] = data[new_pixels]
+        if scene_idx_band is not None:
+            scene_idx_band[new_pixels] = np.int32(scene_idx)
         filled |= new_pixels
         if (filled | ~tile_coverage).all():
             break
     if include_observation_count:
         result = _append_observation_count(result, filled.astype(np.uint16))
+    if include_scene_index:
+        assert scene_idx_band is not None
+        result = _append_scene_index(result, scene_idx_band)
     return spec, result
 
 
@@ -1281,6 +1294,7 @@ def iter_tile_aggregation(
                 out_dtype,
                 band_executor,
                 include_observation_count,
+                include_scene_index,
             )
 
     band_executor_cm: Optional[ThreadPoolExecutor] = None
