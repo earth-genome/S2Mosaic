@@ -11,6 +11,7 @@ except ImportError:
 from .coordinator import mosaic
 from .geometry import Aoi, Bbox
 from .helpers import SceneFetchError
+from .masking import OcmTuning
 from .sources import SOURCE_AWS, SOURCE_MPC
 
 
@@ -42,6 +43,7 @@ __all__ = [
     "mosaic",
     "Aoi",
     "Bbox",
+    "OcmTuning",
     "set_log_level",
     "SceneFetchError",
     "SOURCE_AWS",

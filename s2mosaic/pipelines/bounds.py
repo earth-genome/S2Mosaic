@@ -49,7 +49,7 @@ from ..helpers import (
     report_dropped_scenes,
     with_scene_retry,
 )
-from ..masking import compute_masks_from_array, compute_masks_from_scl
+from ..masking import OcmTuning, compute_masks_from_array, compute_masks_from_scl
 from ..aggregation import (
     adaptive_tile_specs_for_masks,
     run_tile_aggregation,
@@ -362,6 +362,7 @@ def _stream_bounds_combo_masks(
     tile_workers: Optional[int],
     ocm_batch_size: int,
     ocm_inference_dtype: str,
+    ocm_tuning: Optional[OcmTuning],
     scl_tile_specs: Optional[List[Tuple[int, int, int, int]]],
     show_progress: bool,
 ) -> Tuple[Dict[int, "_WindowedBoolMask"], List[Dict[str, str]]]:
@@ -515,6 +516,7 @@ def _stream_bounds_combo_masks(
                     mask_result.arr,
                     batch_size=ocm_batch_size,
                     inference_dtype=ocm_inference_dtype,
+                    tuning=ocm_tuning,
                 )
             clear = clear[mask_result.crop]
             valid = valid[mask_result.crop]
@@ -829,6 +831,7 @@ def run_bounds_pipeline(
         tile_workers=request.tile_workers,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
+        ocm_tuning=request.ocm_tuning,
         scl_tile_specs=scl_tile_specs,
         show_progress=request.show_progress,
     )

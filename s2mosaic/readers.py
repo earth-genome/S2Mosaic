@@ -19,7 +19,7 @@ from rasterio.windows import Window
 from .config import CLOUD_MASK_SCL, MOSAIC_FIRST
 from .geometry import Bbox
 from .helpers import backoff_delay, get_rasterio_resampling
-from .masking import get_masks, get_scl_masks
+from .masking import OcmTuning, get_masks, get_scl_masks
 from .sources import Source
 from ._types import BoundsItemLike
 
@@ -87,6 +87,7 @@ def _compute_one_scene_mask(
     max_dl_workers: int,
     s2_scene_size: int,
     resolution: int,
+    ocm_tuning: Optional[OcmTuning] = None,
 ) -> npt.NDArray[Any]:
     """Phase-1 worker: return the per-scene combo mask.
 
@@ -107,6 +108,7 @@ def _compute_one_scene_mask(
             max_dl_workers=max_dl_workers,
             target_size=s2_scene_size,
             ocm_resolution=ocm_resolution,
+            tuning=ocm_tuning,
         )
     combo: npt.NDArray[Any] = (clear & valid).astype(np.bool_)
     return combo

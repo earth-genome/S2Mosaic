@@ -1,6 +1,7 @@
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -12,6 +13,60 @@ from omnicloudmask import predict_from_array
 from .data_reader import get_full_band
 from .helpers import ensure_item_assets
 from .sources import Source
+
+# OmniCloudMask output classes.
+OCM_CLASS_CLEAR: int = 0
+OCM_CLASS_THICK_CLOUD: int = 1
+OCM_CLASS_THIN_CLOUD: int = 2
+OCM_CLASS_CLOUD_SHADOW: int = 3
+
+
+@dataclass(frozen=True)
+class OcmTuning:
+    """Sensitivity controls for the OCM cloud-mask path.
+
+    The defaults reproduce the original behaviour exactly: hard argmax over
+    the four OCM classes, island/edge cleanup of the clear mask, and no cloud
+    buffer.
+
+    Args:
+        clear_threshold: When set, a pixel counts as clear only if its softmax
+            probability for the clear class is >= this value, rather than
+            merely winning the argmax. Values above ~0.5 make the mask
+            progressively more suspicious, which is the lever for thin cirrus
+            and cloud wisps that only narrowly beat the cloud classes. ``None``
+            keeps argmax.
+        cloud_dilation: Number of 3x3 cross dilations applied to the detected
+            cloud mask before it is subtracted from clear. Buffers the wisps
+            and haloes that fringe a confident detection. Counted in pixels at
+            the OCM working resolution, which is coarser than the output
+            resolution.
+        min_island_size: Minimum connected-component size kept during clear
+            mask cleanup. This cleanup runs on the *clear* mask, so it removes
+            small *cloud* detections (holes in clear); lowering it preserves
+            wisp-scale detections.
+        smooth_edge_size: Circular kernel size for clear mask edge smoothing.
+            Set together with ``min_island_size`` to 0 to skip cleanup.
+    """
+
+    clear_threshold: Optional[float] = None
+    cloud_dilation: int = 0
+    min_island_size: int = 8
+    smooth_edge_size: int = 3
+
+    def validate(self) -> None:
+        if self.clear_threshold is not None and not 0.0 < self.clear_threshold < 1.0:
+            raise ValueError(
+                "OcmTuning.clear_threshold must be in (0, 1), got "
+                f"{self.clear_threshold}"
+            )
+        for name in ("cloud_dilation", "min_island_size", "smooth_edge_size"):
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"OcmTuning.{name} must be >= 0, got {value}")
+
+
+DEFAULT_OCM_TUNING = OcmTuning()
 
 # Sentinel-2 SCL band class values:
 #   0  no_data       6  water
@@ -32,6 +87,23 @@ def _dilate_no_data(no_data: npt.NDArray[Any], dilation_count: int) -> npt.NDArr
         return no_data
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
     return cv2.dilate(no_data, kernel, iterations=dilation_count)
+
+
+def _buffer_cloud(
+    clear: npt.NDArray[Any], valid: npt.NDArray[Any], dilation_count: int
+) -> npt.NDArray[Any]:
+    """Grow detected cloud into neighbouring clear pixels.
+
+    Dilation is seeded from cloud *within the scene footprint* so that
+    scene-edge no-data (which OCM zeroes, and which therefore reads as
+    not-clear) cannot eat into real observations.
+    """
+    if dilation_count <= 0:
+        return clear
+    cloud = (valid & ~clear).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    cloud = cv2.dilate(cloud, kernel, iterations=dilation_count)
+    return clear & (cloud == 0)  # type: ignore[no-any-return, unused-ignore]
 
 
 def get_valid_mask(
@@ -66,10 +138,12 @@ def compute_masks_from_array(
     rgb_nir: npt.NDArray[Any],
     batch_size: int = 6,
     inference_dtype: str = "fp32",
+    tuning: Optional[OcmTuning] = None,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
 
     Returns (clear_mask, valid_mask) at the same resolution as the input.
+    ``tuning`` controls mask sensitivity; see :class:`OcmTuning`.
 
     Suppresses omnicloudmask's "Significant no-data areas detected" warning —
     it fires on every cross-UTM-zone edge scene where the swath polygon is
@@ -77,6 +151,8 @@ def compute_masks_from_array(
     auto-shrinks the patch size and produces correct masks; the warning is
     just noise.
     """
+    tuning = tuning if tuning is not None else DEFAULT_OCM_TUNING
+    use_confidence = tuning.clear_threshold is not None
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -85,19 +161,34 @@ def compute_masks_from_array(
         )
         patch_size = min(*rgb_nir.shape[1:], 1000)
         patch_overlap = min(patch_size // 2, 50)
-        cloud_class = predict_from_array(
+        prediction = predict_from_array(
             input_array=rgb_nir,
             batch_size=batch_size,
             inference_dtype=inference_dtype,
             patch_size=patch_size,
             patch_overlap=patch_overlap,
-        )[0]
-    clear = (cloud_class == 0).astype(np.uint8)
-    clear = clean_array(
-        clear, min_island_size=8, smooth_edge_size=3, connectivity=4
-    ).astype(bool)
+            export_confidence=use_confidence,
+            softmax_output=True,
+        )
+    if use_confidence:
+        # Confidence output is (4, H, W) of per-class probabilities. No-data
+        # pixels are zeroed by OCM, so they read as not-clear and are removed
+        # by ``valid`` below.
+        clear_prob = prediction[OCM_CLASS_CLEAR]
+        clear = (clear_prob >= tuning.clear_threshold).astype(np.uint8)
+    else:
+        clear = (prediction[0] == OCM_CLASS_CLEAR).astype(np.uint8)
+    if tuning.min_island_size > 0 or tuning.smooth_edge_size > 0:
+        clear = clean_array(
+            clear,
+            min_island_size=tuning.min_island_size,
+            smooth_edge_size=tuning.smooth_edge_size,
+            connectivity=4,
+        )
+    clear_bool = clear.astype(bool)
     valid = get_valid_mask(rgb_nir)
-    return clear, valid
+    clear_bool = _buffer_cloud(clear_bool, valid, tuning.cloud_dilation)
+    return clear_bool, valid
 
 
 def get_scl_masks(
@@ -127,6 +218,7 @@ def get_masks(
     max_dl_workers: int = 4,
     target_size: Union[int, Tuple[int, int]] = 10980,
     ocm_resolution: int = 20,
+    tuning: Optional[OcmTuning] = None,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
     ocm_bands = ["B04", "B03", "B8A"]
@@ -149,7 +241,10 @@ def get_masks(
     ocm_input = np.vstack(band_arrays)
 
     clear, valid = compute_masks_from_array(
-        ocm_input, batch_size=batch_size, inference_dtype=inference_dtype
+        ocm_input,
+        batch_size=batch_size,
+        inference_dtype=inference_dtype,
+        tuning=tuning,
     )
     # Resample masks from OCM resolution (20m) to the target output shape.
     target_height, target_width = (

@@ -7,6 +7,7 @@ import numpy.typing as npt
 from .config import MosaicRequest
 from .gdal_env import apply_gdal_network_defaults
 from .geometry import Aoi, Bbox
+from .masking import OcmTuning
 from .pipelines.bounds import run_bounds_pipeline
 from .pipelines.grid import run_grid_pipeline
 from .sources import SOURCE_MPC, get_source
@@ -44,6 +45,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    ocm_tuning: Optional[OcmTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -87,6 +89,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    ocm_tuning: Optional[OcmTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -130,6 +133,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    ocm_tuning: Optional[OcmTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -172,6 +176,7 @@ def mosaic(
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "fp32",
+    ocm_tuning: Optional[OcmTuning] = None,
     output_crs: Optional[int] = None,
     resolution: int = 10,
     resampling_method: str = "nearest",
@@ -270,6 +275,10 @@ def mosaic(
             (most CPUs lack efficient fp16/bf16 paths). On GPU, switch to
             "fp16" for ~2× speedup with lower VRAM use, or "bf16" on hardware
             that supports it (Ampere+ NVIDIA, Apple Silicon).
+        ocm_tuning (OcmTuning, optional): OCM mask sensitivity controls —
+            clear-probability threshold, cloud dilation, and clear-mask
+            cleanup sizes. Defaults to None, which keeps the historical
+            argmax behaviour. See :class:`s2mosaic.OcmTuning`.
         output_crs (int, optional): EPSG code for the output grid. Must be a
             projected CRS — geographic CRSes (e.g. 4326) are rejected at
             validation, because ``resolution`` is interpreted as metres in the
@@ -358,6 +367,7 @@ def mosaic(
         cloud_mask=cloud_mask,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
+        ocm_tuning=ocm_tuning,
         output_crs=output_crs,
         resolution=resolution,
         resampling_method=resampling_method,

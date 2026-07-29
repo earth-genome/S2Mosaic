@@ -245,7 +245,9 @@ class TestBoundsOcmContext:
                 crop=crop,
             )
 
-        def fake_compute_masks_from_array(array, *, batch_size, inference_dtype):
+        def fake_compute_masks_from_array(
+            array, *, batch_size, inference_dtype, tuning
+        ):
             compute_input_shapes.append(array.shape)
             clear = np.zeros(array.shape[1:], dtype=bool)
             valid = np.ones(array.shape[1:], dtype=bool)
@@ -341,7 +343,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "compute_masks_from_array",
-            lambda array, *, batch_size, inference_dtype: (
+            lambda array, *, batch_size, inference_dtype, tuning: (
                 np.ones(array.shape[1:], dtype=bool),
                 np.ones(array.shape[1:], dtype=bool),
             ),
@@ -432,6 +434,7 @@ class TestBoundsOcmContext:
                 tile_workers=1,
                 ocm_batch_size=1,
                 ocm_inference_dtype="bf16",
+                ocm_tuning=None,
                 scl_tile_specs=None,
                 show_progress=False,
             )
@@ -1286,6 +1289,7 @@ class TestBoundsOcmContext:
                 tile_workers=1,
                 ocm_batch_size=1,
                 ocm_inference_dtype="fp32",
+                ocm_tuning=None,
                 scl_tile_specs=None,
                 show_progress=False,
             )
