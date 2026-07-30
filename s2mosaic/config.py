@@ -23,6 +23,7 @@ MOSAIC_MEAN = "mean"
 MOSAIC_FIRST = "first"
 MOSAIC_PERCENTILE = "percentile"
 MOSAIC_MEDOID = "medoid"
+MOSAIC_VETO_FIRST = "veto_first"
 
 CLOUD_MASK_OCM = "OCM"
 CLOUD_MASK_SCL = "SCL"
@@ -33,7 +34,13 @@ VALID_SCENE_ORDERS = {
     SCENE_ORDER_NEWEST,
     SCENE_ORDER_CUSTOM,
 }
-VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE, MOSAIC_MEDOID}
+VALID_MOSAIC_METHODS = {
+    MOSAIC_MEAN,
+    MOSAIC_FIRST,
+    MOSAIC_PERCENTILE,
+    MOSAIC_MEDOID,
+    MOSAIC_VETO_FIRST,
+}
 VALID_CLOUD_MASKS = {CLOUD_MASK_OCM, CLOUD_MASK_SCL}
 VALID_RESAMPLING_METHODS = {
     "nearest",
@@ -69,6 +76,57 @@ DEFAULT_ADDITIONAL_QUERY: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}}
 BOUNDS_MIN_AREA_M2 = 100
 BOUNDS_MIN_DIM_M = 10
 BOUNDS_LARGE_PIXEL_WARNING_COUNT = 20_000 * 20_000
+
+
+@dataclass(frozen=True)
+class VetoTuning:
+    """Thresholds for the ``veto_first`` compositor.
+
+    ``veto_first`` is ``first`` with an outlier gate: it keeps the ranked
+    scene order and the contiguous provenance that comes with it, but skips a
+    candidate observation when that observation looks like cloud the mask
+    failed to catch. Only bright outliers are rejected, which is what
+    distinguishes it from ``medoid`` — a symmetric estimator re-picks every
+    pixel and can move a pixel either direction, so it churns provenance
+    across the whole tile to fix a defect occupying a fraction of a percent.
+
+    Attributes:
+        excess_dn: Reject a candidate when its *minimum* per-band excess over
+            the per-band median across valid observations exceeds this many
+            DN. Requiring every band to be elevated is what keeps legitimate
+            bright ground out of the gate: cloud raises all bands together,
+            while bare soil raises the visible bands but *lowers* NIR
+            relative to vegetation, and snow raises everything except SWIR.
+            In c1-l2a scaling (reflectance x 10000) 500 DN is 0.05
+            reflectance, roughly the point where thin haze becomes visible.
+        min_observations: Minimum valid observations at a pixel before the
+            gate may fire. With two observations the median is their midpoint
+            and the brighter one always shows half the gap as excess, which
+            would veto on nothing more than acquisition noise. Below this
+            count the pixel behaves exactly like ``first``.
+        max_vetoes_per_pixel: Cap on consecutive rejections at one pixel.
+            Once exhausted the pixel takes the least-excessive candidate, so
+            coverage can never drop below what ``first`` would have produced.
+    """
+
+    excess_dn: int = 500
+    min_observations: int = 3
+    max_vetoes_per_pixel: int = 4
+
+    def validate(self) -> None:
+        if self.excess_dn <= 0:
+            raise ValueError(f"excess_dn must be positive, got {self.excess_dn}")
+        if self.min_observations < 2:
+            raise ValueError(
+                f"min_observations must be >= 2, got {self.min_observations}"
+            )
+        if self.max_vetoes_per_pixel < 1:
+            raise ValueError(
+                f"max_vetoes_per_pixel must be >= 1, got {self.max_vetoes_per_pixel}"
+            )
+
+
+DEFAULT_VETO_TUNING = VetoTuning()
 
 
 @dataclass(frozen=True)
@@ -128,6 +186,7 @@ class MosaicRequest:
     ocm_batch_size: int = 1
     ocm_inference_dtype: str = "fp32"
     ocm_tuning: Optional[OcmTuning] = None
+    veto_tuning: Optional[VetoTuning] = None
     output_crs: Optional[int] = None
     resolution: int = 10
     resampling_method: str = "nearest"
@@ -194,6 +253,13 @@ class MosaicRequest:
         )
         if self.ocm_tuning is not None:
             self.ocm_tuning.validate()
+        if self.veto_tuning is not None:
+            if self.mosaic_method != MOSAIC_VETO_FIRST:
+                raise ValueError(
+                    "veto_tuning is only valid with mosaic_method="
+                    f"'{MOSAIC_VETO_FIRST}'; got {self.mosaic_method}"
+                )
+            self.veto_tuning.validate()
 
 
 def normalize_mosaic_inputs(
@@ -353,10 +419,14 @@ def validate_inputs(
         raise ValueError(
             f"include_scene_index must be a bool, got {include_scene_index}"
         )
-    if include_scene_index and mosaic_method not in (MOSAIC_MEDOID, MOSAIC_FIRST):
+    if include_scene_index and mosaic_method not in (
+        MOSAIC_MEDOID,
+        MOSAIC_FIRST,
+        MOSAIC_VETO_FIRST,
+    ):
         raise ValueError(
-            "include_scene_index is only supported with mosaic_method='medoid' "
-            f"or 'first'; got {mosaic_method}"
+            "include_scene_index is only supported with mosaic_method='medoid', "
+            f"'first' or '{MOSAIC_VETO_FIRST}'; got {mosaic_method}"
         )
     for band in bands:
         if band not in VALID_BANDS:
