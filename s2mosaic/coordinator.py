@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy.typing as npt
 
-from .config import MosaicRequest
+from .config import MosaicRequest, VetoTuning
 from .gdal_env import apply_gdal_network_defaults
 from .geometry import Aoi, Bbox
 from .masking import OcmTuning
@@ -46,6 +46,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     ocm_tuning: Optional[OcmTuning] = ...,
+    veto_tuning: Optional[VetoTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -90,6 +91,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     ocm_tuning: Optional[OcmTuning] = ...,
+    veto_tuning: Optional[VetoTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -134,6 +136,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     ocm_tuning: Optional[OcmTuning] = ...,
+    veto_tuning: Optional[VetoTuning] = ...,
     output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
@@ -177,6 +180,7 @@ def mosaic(
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "fp32",
     ocm_tuning: Optional[OcmTuning] = None,
+    veto_tuning: Optional[VetoTuning] = None,
     output_crs: Optional[int] = None,
     resolution: int = 10,
     resampling_method: str = "nearest",
@@ -221,7 +225,15 @@ def mosaic(
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
         mosaic_method (str, optional): Method to create the mosaic. Options
             are ``"mean"``, ``"first"``, ``"median"``, ``"percentile"`` (with
-            ``percentile``), or ``"medoid"``. Defaults to ``"mean"``. The
+            ``percentile``), ``"medoid"``, or ``"veto_first"``. Defaults to
+            ``"mean"``. The ``"veto_first"`` mode is ``"first"`` with a
+            one-sided bright-outlier gate: it keeps the ranked scene order,
+            and the contiguous provenance that comes with it, but skips a
+            candidate observation when every band sits well above the
+            per-pixel median — the signature of cloud the mask missed. Unlike
+            ``"medoid"`` it never re-picks a pixel that was already fine, so
+            provenance stays intact outside the defects. See
+            :class:`s2mosaic.VetoTuning`. The
             ``"medoid"`` mode picks, for each pixel, the scene whose
             multi-band spectrum is closest (squared Euclidean) to the
             per-band median across all valid scenes for that pixel. The
@@ -279,6 +291,10 @@ def mosaic(
             clear-probability threshold, cloud dilation, and clear-mask
             cleanup sizes. Defaults to None, which keeps the historical
             argmax behaviour. See :class:`s2mosaic.OcmTuning`.
+        veto_tuning (VetoTuning, optional): Gate thresholds for
+            ``mosaic_method="veto_first"``; rejected for every other method.
+            Defaults to None, which uses :class:`s2mosaic.VetoTuning`
+            defaults. See :class:`s2mosaic.VetoTuning`.
         output_crs (int, optional): EPSG code for the output grid. Must be a
             projected CRS — geographic CRSes (e.g. 4326) are rejected at
             validation, because ``resolution`` is interpreted as metres in the
@@ -368,6 +384,7 @@ def mosaic(
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
         ocm_tuning=ocm_tuning,
+        veto_tuning=veto_tuning,
         output_crs=output_crs,
         resolution=resolution,
         resampling_method=resampling_method,

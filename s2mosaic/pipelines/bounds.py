@@ -994,6 +994,7 @@ def run_bounds_pipeline(
                 show_progress=request.show_progress,
                 min_tile_size=min_tile_size,
                 include_observation_count=request.include_observation_count,
+                veto_tuning=request.veto_tuning,
             )
             write_output_sidecar(export_path, sidecar_metadata)
             return result
@@ -1016,6 +1017,7 @@ def run_bounds_pipeline(
             show_progress=request.show_progress,
             min_tile_size=min_tile_size,
             include_observation_count=request.include_observation_count,
+            veto_tuning=request.veto_tuning,
         )
 
         return finalize_output(
