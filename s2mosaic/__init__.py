@@ -8,7 +8,6 @@ except ImportError:
     # the repo). setuptools-scm writes _version.py at build time.
     __version__ = "0.0.0+unknown"
 
-from .config import VetoTuning
 from .coordinator import mosaic
 from .geometry import Aoi, Bbox
 from .helpers import SceneFetchError
@@ -45,7 +44,6 @@ __all__ = [
     "Aoi",
     "Bbox",
     "OcmTuning",
-    "VetoTuning",
     "set_log_level",
     "SceneFetchError",
     "SOURCE_AWS",

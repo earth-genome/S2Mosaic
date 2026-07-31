@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from ..aggregation import run_tile_aggregation, write_tile_aggregation_geotiff
 from ..streaming import iter_ordered_fetches
-from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest, VetoTuning
+from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest
 from ..masking import OcmTuning
 from ..frequent_coverage import get_frequent_coverage
 from ..helpers import (
@@ -185,7 +185,6 @@ def run_grid_pipeline(
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
         ocm_tuning=request.ocm_tuning,
-        veto_tuning=request.veto_tuning,
         coverage_mask=coverage_mask,
         percentile=request.percentile,
         s2_scene_size=target_size,
@@ -251,7 +250,6 @@ def stream_mosaic_pipeline(
     show_progress: bool = False,
     include_observation_count: bool = False,
     include_scene_index: bool = False,
-    veto_tuning: Optional[VetoTuning] = None,
 ) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any], List[Dict[str, str]]]:
     """Tile-streamed mosaic for grid_id mode.
 
@@ -485,7 +483,6 @@ def stream_mosaic_pipeline(
                 show_progress=show_progress,
                 min_tile_size=min_tile_size,
                 include_observation_count=include_observation_count,
-                veto_tuning=veto_tuning,
             )
             return None, last_profile, dropped_scenes
 
@@ -508,8 +505,6 @@ def stream_mosaic_pipeline(
             min_tile_size=min_tile_size,
             include_observation_count=include_observation_count,
             include_scene_index=include_scene_index,
-            veto_tuning=veto_tuning,
-            bands=bands,
         )
         return out, last_profile, dropped_scenes
     finally:
