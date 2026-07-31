@@ -21,6 +21,7 @@ from s2mosaic.aggregation import (
     adaptive_tile_specs_for_masks,
     iter_tile_aggregation,
     run_tile_aggregation,
+    veto_band_plan,
     write_tile_aggregation_geotiff,
 )
 from s2mosaic.config import VetoTuning
@@ -1466,8 +1467,18 @@ class TestVetoFirstAxis0U16:
     DEFAULTS = VetoTuning()
 
     @staticmethod
-    def _reference_veto_first(stack, valid, excess_dn, min_obs, max_vetoes):
+    def _reference_veto_first(
+        stack,
+        valid,
+        excess_dn,
+        min_obs,
+        max_vetoes,
+        detect=None,
+        guard=(),
+        snow_guard_dn=0,
+    ):
         n_scenes, n_bands, h, w = stack.shape
+        detect = tuple(range(n_bands)) if detect is None else tuple(detect)
         out = np.zeros((n_bands, h, w), dtype=np.uint16)
         out_valid = np.zeros((h, w), dtype=bool)
         out_idx = np.full((h, w), -1, dtype=np.int32)
@@ -1491,11 +1502,17 @@ class TestVetoFirstAxis0U16:
                         chosen = s
                         break
                     excess = min(
-                        float(stack[s, b, y, x]) - medians[b] for b in range(n_bands)
+                        float(stack[s, b, y, x]) - medians[b] for b in detect
                     )
                     if best_excess is None or excess < best_excess:
                         best_scene, best_excess = s, excess
                     if excess <= excess_dn:
+                        chosen = s
+                        break
+                    if guard and snow_guard_dn > 0 and any(
+                        float(stack[s, b, y, x]) - medians[b] < -snow_guard_dn
+                        for b in guard
+                    ):
                         chosen = s
                         break
                     vetoes += 1
@@ -1518,15 +1535,22 @@ class TestVetoFirstAxis0U16:
                 stack[s, b, 0, 0] = row[b]
         return stack, np.ones((len(rows), 1, 1), dtype=bool)
 
-    def _run(self, rows, n_bands=3, tuning=None):
+    def _run(self, rows, n_bands=3, tuning=None, bands=None):
         tuning = tuning or self.DEFAULTS
         stack, valid = self._stack_from_rows(rows, n_bands)
+        median_bands, detect_slots, guard_slots = veto_band_plan(
+            tuning, bands, n_bands
+        )
         out, out_valid, out_idx, n_vetoed = _veto_first_axis0_u16(
             stack,
             valid,
             tuning.excess_dn,
             tuning.min_observations,
             tuning.max_vetoes_per_pixel,
+            median_bands,
+            detect_slots,
+            guard_slots,
+            tuning.snow_guard_dn,
         )
         return (
             out[:, 0, 0],
@@ -1622,7 +1646,9 @@ class TestVetoFirstAxis0U16:
         stack = np.full((3, 2, 1, 1), 1000, dtype=np.uint16)
         valid = np.zeros((3, 1, 1), dtype=bool)
 
-        out, out_valid, out_idx, _ = _veto_first_axis0_u16(stack, valid, 500, 3, 4)
+        out, out_valid, out_idx, _ = _veto_first_axis0_u16(
+            stack, valid, 500, 3, 4, *veto_band_plan(VetoTuning(), None, 2), 0
+        )
 
         assert not out_valid.any()
         np.testing.assert_array_equal(out_idx, [[-1]])
@@ -1637,7 +1663,10 @@ class TestVetoFirstAxis0U16:
             stack = rng.integers(0, 12000, size=(scenes, bands, 6, 5), dtype=np.uint16)
             valid = rng.random((scenes, 6, 5)) < 0.6
 
-            _, out_valid, out_idx, _ = _veto_first_axis0_u16(stack, valid, 500, 3, 4)
+            _, out_valid, out_idx, _ = _veto_first_axis0_u16(
+                stack, valid, 500, 3, 4,
+                *veto_band_plan(VetoTuning(), None, bands), 0,
+            )
 
             np.testing.assert_array_equal(out_valid, valid.any(axis=0))
             assert ((out_idx >= 0) == valid.any(axis=0)).all()
@@ -1653,7 +1682,8 @@ class TestVetoFirstAxis0U16:
                 valid = rng.random((scenes, h, w)) < 0.75
 
                 got, got_valid, got_idx, _ = _veto_first_axis0_u16(
-                    stack, valid, excess_dn, 3, 4
+                    stack, valid, excess_dn, 3, 4,
+                    *veto_band_plan(VetoTuning(), None, bands), 0,
                 )
                 exp, exp_valid, exp_idx = self._reference_veto_first(
                     stack, valid, excess_dn, 3, 4
@@ -1666,6 +1696,170 @@ class TestVetoFirstAxis0U16:
     def test_warm_compile_runs_before_threaded_aggregation(self):
         _warm_veto_first_axis0_u16()
         assert _veto_first_axis0_u16.signatures
+
+
+class TestVetoFirstDetectionBands:
+    """Which bands the gate looks at decides what it can see.
+
+    Sentinel-2 order for these fixtures: B02 blue, B03 green, B04 red,
+    B08 NIR, B11 SWIR.
+    """
+
+    BANDS = ("B02", "B03", "B04", "B08", "B11")
+    GROUND = (500, 700, 600, 3000, 2000)
+    VISIBLE = ("B02", "B03", "B04")
+
+    def _run(self, contaminated, tuning):
+        rows = [contaminated, self.GROUND, self.GROUND]
+        stack = np.zeros((3, len(self.BANDS), 1, 1), dtype=np.uint16)
+        for s, row in enumerate(rows):
+            for b, value in enumerate(row):
+                stack[s, b, 0, 0] = value
+        valid = np.ones((3, 1, 1), dtype=bool)
+        plan = veto_band_plan(tuning, self.BANDS, len(self.BANDS))
+        _, _, out_idx, _ = _veto_first_axis0_u16(
+            stack,
+            valid,
+            tuning.excess_dn,
+            tuning.min_observations,
+            tuning.max_vetoes_per_pixel,
+            *plan,
+            tuning.snow_guard_dn,
+        )
+        return int(out_idx[0, 0])
+
+    # Haze scatters in the blue and barely reaches the SWIR, so the SWIR
+    # excess holds the all-band minimum near zero and hides it from a
+    # unanimity rule however plain it looks in the visible bands.
+    HAZY = (1100, 1300, 1200, 3100, 2020)
+
+    def test_unanimity_across_all_bands_cannot_see_thin_haze(self):
+        assert self._run(self.HAZY, VetoTuning(excess_dn=300)) == 0
+
+    def test_visible_only_detection_catches_the_same_haze(self):
+        tuning = VetoTuning(excess_dn=300, detect_bands=self.VISIBLE)
+        assert self._run(self.HAZY, tuning) == 1
+
+    def test_detection_subset_still_respects_the_threshold(self):
+        tuning = VetoTuning(excess_dn=1000, detect_bands=self.VISIBLE)
+        assert self._run(self.HAZY, tuning) == 0
+
+    # Snow is bright in the visible bands like cloud, but ice absorbs at
+    # 1.6 um so it sits below the median in SWIR where cloud sits above.
+    SNOW = (8000, 8200, 8100, 6000, 400)
+    CLOUD = (8000, 8200, 8100, 6000, 3500)
+
+    def test_snow_is_vetoed_when_the_guard_is_off(self):
+        tuning = VetoTuning(excess_dn=300, detect_bands=self.VISIBLE)
+        assert self._run(self.SNOW, tuning) == 1
+
+    def test_snow_guard_keeps_snow(self):
+        tuning = VetoTuning(
+            excess_dn=300,
+            detect_bands=self.VISIBLE,
+            snow_guard_bands=("B11",),
+            snow_guard_dn=500,
+        )
+        assert self._run(self.SNOW, tuning) == 0
+
+    def test_snow_guard_does_not_spare_cloud(self):
+        tuning = VetoTuning(
+            excess_dn=300,
+            detect_bands=self.VISIBLE,
+            snow_guard_bands=("B11",),
+            snow_guard_dn=500,
+        )
+        assert self._run(self.CLOUD, tuning) == 1
+
+    def test_guard_needs_the_dip_to_clear_its_own_threshold(self):
+        # SWIR sits 1600 DN below the median here, so a 2000 DN guard is
+        # not satisfied and the candidate is treated as cloud.
+        tuning = VetoTuning(
+            excess_dn=300,
+            detect_bands=self.VISIBLE,
+            snow_guard_bands=("B11",),
+            snow_guard_dn=2000,
+        )
+        assert self._run(self.SNOW, tuning) == 1
+
+    def test_medians_are_computed_only_for_the_bands_the_gate_uses(self):
+        # The median pass dominates the kernel's cost, so the plan must not
+        # ask for bands no test will read.
+        tuning = VetoTuning(
+            detect_bands=self.VISIBLE, snow_guard_bands=("B11",), snow_guard_dn=500
+        )
+        median_bands, detect_slots, guard_slots = veto_band_plan(
+            tuning, self.BANDS, len(self.BANDS)
+        )
+        assert sorted(median_bands.tolist()) == [0, 1, 2, 4]
+        assert [median_bands[s] for s in detect_slots] == [0, 1, 2]
+        assert [median_bands[s] for s in guard_slots] == [4]
+
+    def test_guard_bands_are_dropped_when_the_guard_is_disabled(self):
+        tuning = VetoTuning(detect_bands=self.VISIBLE, snow_guard_bands=("B11",))
+        median_bands, _, guard_slots = veto_band_plan(
+            tuning, self.BANDS, len(self.BANDS)
+        )
+        assert median_bands.tolist() == [0, 1, 2]
+        assert guard_slots.size == 0
+
+    def test_plan_falls_back_to_all_bands_without_a_band_list(self):
+        median_bands, detect_slots, guard_slots = veto_band_plan(
+            VetoTuning(detect_bands=self.VISIBLE), None, 5
+        )
+        assert median_bands.tolist() == [0, 1, 2, 3, 4]
+        assert detect_slots.tolist() == [0, 1, 2, 3, 4]
+        assert guard_slots.size == 0
+
+    @pytest.mark.parametrize("role", ["detect_bands", "snow_guard_bands"])
+    def test_unrequested_bands_are_rejected(self, role):
+        kwargs = {role: ("B99",)}
+        if role == "snow_guard_bands":
+            kwargs["snow_guard_dn"] = 500
+        with pytest.raises(ValueError, match="not requested"):
+            VetoTuning(**kwargs).resolve_bands(self.BANDS)
+
+    @pytest.mark.parametrize("snow_guard_dn", [0, 400])
+    def test_random_stacks_match_float_reference(self, snow_guard_dn):
+        detect, guard = (0, 1, 2), (4,)
+        tuning = VetoTuning(
+            excess_dn=400,
+            detect_bands=self.VISIBLE,
+            snow_guard_bands=("B11",),
+            snow_guard_dn=snow_guard_dn,
+        )
+        plan = veto_band_plan(tuning, self.BANDS, len(self.BANDS))
+        rng = np.random.default_rng(31)
+        for _ in range(8):
+            stack = rng.integers(0, 12000, size=(6, 5, 4, 4), dtype=np.uint16)
+            valid = rng.random((6, 4, 4)) < 0.8
+
+            got, got_valid, got_idx, _ = _veto_first_axis0_u16(
+                stack, valid, 400, 3, 4, *plan, snow_guard_dn
+            )
+            exp, exp_valid, exp_idx = TestVetoFirstAxis0U16._reference_veto_first(
+                stack, valid, 400, 3, 4, detect, guard, snow_guard_dn
+            )
+
+            np.testing.assert_array_equal(got_valid, exp_valid)
+            np.testing.assert_array_equal(got_idx, exp_idx)
+            np.testing.assert_array_equal(got, exp)
+
+    def test_coverage_survives_a_narrow_detection_set(self):
+        # Narrowing detection makes the gate fire far more often, so the
+        # coverage guarantee matters more here than in the all-band case.
+        tuning = VetoTuning(excess_dn=50, detect_bands=self.VISIBLE)
+        plan = veto_band_plan(tuning, self.BANDS, len(self.BANDS))
+        rng = np.random.default_rng(5)
+        stack = rng.integers(0, 12000, size=(7, 5, 6, 6), dtype=np.uint16)
+        valid = rng.random((7, 6, 6)) < 0.5
+
+        _, out_valid, out_idx, _ = _veto_first_axis0_u16(
+            stack, valid, 50, 3, 4, *plan, 0
+        )
+
+        np.testing.assert_array_equal(out_valid, valid.any(axis=0))
+        assert ((out_idx >= 0) == valid.any(axis=0)).all()
 
 
 class TestVetoFirstAggregation:
@@ -1689,11 +1883,11 @@ class TestVetoFirstAggregation:
             axis=0,
         )
 
-    def _aggregate(self, scenes, n_masks, bands=3, **kwargs):
+    def _aggregate(self, scenes, n_masks, n_bands=3, **kwargs):
         return run_tile_aggregation(
             masks=[np.ones((self.H, self.W), dtype=bool) for _ in range(n_masks)],
             read_fn=self._read_fn_for(scenes),
-            bands_count=bands,
+            bands_count=n_bands,
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
@@ -1710,6 +1904,39 @@ class TestVetoFirstAggregation:
         out = self._aggregate(scenes, 4)
 
         np.testing.assert_array_equal(out, np.full((3, self.H, self.W), 1000))
+
+    def test_detection_bands_reach_the_kernel(self):
+        # Top scene is elevated in the visible bands only, so it survives a
+        # unanimity rule and is rejected once detection narrows to them.
+        band_names = ["B02", "B03", "B11"]
+        scenes = np.zeros((3, 3, self.H, self.W), dtype=np.uint16)
+        scenes[0] = np.array([4000, 4000, 2000], dtype=np.uint16)[:, None, None]
+        scenes[1] = np.array([1000, 1000, 2000], dtype=np.uint16)[:, None, None]
+        scenes[2] = np.array([1000, 1000, 2000], dtype=np.uint16)[:, None, None]
+
+        all_bands = self._aggregate(
+            scenes, 3, veto_tuning=VetoTuning(excess_dn=300), bands=band_names
+        )
+        visible = self._aggregate(
+            scenes,
+            3,
+            veto_tuning=VetoTuning(excess_dn=300, detect_bands=("B02", "B03")),
+            bands=band_names,
+        )
+
+        assert all_bands[0].max() == 4000
+        assert visible[0].max() == 1000
+
+    def test_unknown_detection_band_fails_before_reading_tiles(self):
+        scenes = self._scenes([1000, 1200, 900])
+
+        with pytest.raises(ValueError, match="not requested"):
+            self._aggregate(
+                scenes,
+                3,
+                veto_tuning=VetoTuning(detect_bands=("B99",)),
+                bands=["B02", "B03", "B04"],
+            )
 
     def test_skips_unanimous_bright_top_scene(self):
         scenes = self._scenes([3000, 1000, 1000, 1000])
@@ -1811,11 +2038,19 @@ class TestVetoTuningValidation:
             ({"excess_dn": -1}, "excess_dn"),
             ({"min_observations": 1}, "min_observations"),
             ({"max_vetoes_per_pixel": 0}, "max_vetoes_per_pixel"),
+            ({"detect_bands": ()}, "detect_bands"),
+            ({"snow_guard_dn": -1}, "snow_guard_dn"),
+            ({"snow_guard_dn": 500}, "snow_guard_bands"),
         ],
     )
     def test_out_of_range_values_rejected(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
             VetoTuning(**kwargs).validate()
+
+    def test_guard_bands_without_a_threshold_are_allowed(self):
+        # Naming guard bands but leaving the threshold at zero is the
+        # documented way to keep the guard configured but inert.
+        VetoTuning(snow_guard_bands=("B11",)).validate()
 
 
 class TestDrainWithRequeue:

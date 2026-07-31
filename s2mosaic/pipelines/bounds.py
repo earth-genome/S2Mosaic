@@ -1018,6 +1018,7 @@ def run_bounds_pipeline(
             min_tile_size=min_tile_size,
             include_observation_count=request.include_observation_count,
             veto_tuning=request.veto_tuning,
+            bands=request.bands,
         )
 
         return finalize_output(
