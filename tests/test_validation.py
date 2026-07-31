@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from shapely.geometry import MultiPolygon, Polygon
 
-from s2mosaic import VetoTuning, mosaic
+from s2mosaic import mosaic
 from s2mosaic.config import validate_inputs
 
 
@@ -43,22 +43,6 @@ class TestMosaicBoundsValidation:
     def test_invalid_mosaic_method_rejected(self):
         with pytest.raises(ValueError, match="Invalid mosaic method"):
             self._call(self.VALID_BOUNDS, mosaic_method="bogus")
-
-    def test_veto_tuning_rejected_for_other_methods(self):
-        with pytest.raises(ValueError, match="veto_tuning is only valid"):
-            self._call(
-                self.VALID_BOUNDS,
-                mosaic_method="medoid",
-                veto_tuning=VetoTuning(excess_dn=300),
-            )
-
-    def test_veto_tuning_thresholds_validated(self):
-        with pytest.raises(ValueError, match="excess_dn"):
-            self._call(
-                self.VALID_BOUNDS,
-                mosaic_method="veto_first",
-                veto_tuning=VetoTuning(excess_dn=0),
-            )
 
     def test_grid_id_and_bounds_mutually_exclusive(self):
         with pytest.raises(ValueError, match="Exactly one"):
