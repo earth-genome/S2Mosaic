@@ -12,7 +12,7 @@ from concurrent.futures import (
     wait,
 )
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -417,6 +417,10 @@ def _veto_first_axis0_u16(
     excess_dn: int,
     min_observations: int,
     max_vetoes: int,
+    median_bands: npt.NDArray[np.int32],
+    detect_slots: npt.NDArray[np.int32],
+    guard_slots: npt.NDArray[np.int32],
+    snow_guard_dn: int,
 ) -> Tuple[
     npt.NDArray[np.uint16],
     npt.NDArray[np.bool_],
@@ -434,19 +438,28 @@ def _veto_first_axis0_u16(
     upward as downward, shredding provenance across the entire tile to
     repair a defect that covers a fraction of a percent of it.
 
-    The gate uses the **minimum** per-band excess, so it fires only when
-    *every* band sits above the median. Cloud and haze lift all bands
-    together, whereas legitimately bright ground does not: bare soil raises
-    the visible bands but drops NIR relative to vegetation, and snow raises
-    everything except SWIR. Requiring unanimity therefore buys cloud
-    discrimination without the kernel needing to know which band is which.
+    The gate fires when the **minimum** excess across the detection bands
+    clears the threshold, so every one of those bands must sit above the
+    median. Which bands belong in that set is the whole sensitivity question:
+    demanding unanimity across all twelve is nearly inert against thin haze,
+    because haze scatters strongly in the blue and negligibly in the SWIR, so
+    the SWIR excess pins the minimum near zero no matter how obvious the haze.
+
+    Narrowing the detection set to the visible bands costs less
+    discrimination than it seems to, because the reference is the pixel's own
+    temporal median. Ground that is persistently bright is bright in the
+    median as well and shows no excess at all, so it is invisible to the gate
+    without any spectral reasoning. Only *transient* brightening is exposed.
+    Snow is the transient case that a visible-only rule cannot separate from
+    cloud by amplitude, so it gets its own test: ice absorbs at 1.6 and 2.2
+    um, putting snow below the median in SWIR where cloud sits above it.
 
     Args:
         stack: ``(scene, band, height, width)`` uint16, scene axis already in
             priority order. Values at invalid positions are ignored.
         valid: ``(scene, height, width)`` bool candidate mask.
-        excess_dn: Reject when the minimum per-band excess over the median
-            exceeds this many DN.
+        excess_dn: Reject when the minimum detection-band excess over the
+            median exceeds this many DN.
         min_observations: Skip the gate entirely below this many valid
             observations, where the median is too weak to trust. Two
             observations make the median their midpoint, so the brighter one
@@ -454,6 +467,16 @@ def _veto_first_axis0_u16(
         max_vetoes: Consecutive-rejection cap per pixel. On exhaustion the
             pixel takes the least-excessive candidate examined, so coverage
             always matches plain ``first``.
+        median_bands: Band indices needing a median. Only the detection and
+            guard bands qualify, which is why this is separate from the band
+            axis: the median pass sorts every observation per band per pixel
+            and dominates the kernel's cost, so a six-band subset of a twelve
+            band request halves it.
+        detect_slots: Offsets into ``median_bands`` for the detection bands.
+        guard_slots: Offsets into ``median_bands`` for the snow-guard bands.
+            Empty disables the guard.
+        snow_guard_dn: A candidate reading this far *below* the median in any
+            guard band is treated as snow and kept.
 
     Returns:
         ``(out, out_valid, out_idx, n_vetoed)`` where ``out_idx`` indexes the
@@ -466,6 +489,9 @@ def _veto_first_axis0_u16(
     ``2*excess_dn``) to keep everything in integer math.
     """
     n_scenes, n_bands, h, w = stack.shape
+    n_median = median_bands.shape[0]
+    n_detect = detect_slots.shape[0]
+    n_guard = guard_slots.shape[0]
 
     out = np.zeros((n_bands, h, w), dtype=np.uint16)
     out_valid = np.zeros((h, w), dtype=np.bool_)
@@ -473,6 +499,8 @@ def _veto_first_axis0_u16(
     n_vetoed = np.zeros((h, w), dtype=np.int32)
     values = np.empty(n_scenes, dtype=np.uint16)
     threshold2 = np.int64(2) * np.int64(excess_dn)
+    guard_floor2 = np.int64(-2) * np.int64(snow_guard_dn)
+    guard_active = n_guard > 0 and snow_guard_dn > 0
     int64_max = np.int64(np.iinfo(np.int64).max)
 
     for y0 in range(0, h, MEDOID_STRIPE_HEIGHT):
@@ -491,9 +519,11 @@ def _veto_first_axis0_u16(
                         total += 1
                 n_valid_map[yy, x] = total
 
-        # Pass 1: doubled per-band median target across valid observations.
-        target = np.zeros((n_bands, rows, w), dtype=np.int32)
-        for b in range(n_bands):
+        # Pass 1: doubled per-band median target across valid observations,
+        # for the detection and guard bands only.
+        target = np.zeros((n_median, rows, w), dtype=np.int32)
+        for slot in range(n_median):
+            b = median_bands[slot]
             for yy in range(rows):
                 y = y0 + yy
                 for x in range(w):
@@ -513,9 +543,9 @@ def _veto_first_axis0_u16(
                         values[j + 1] = key
                     mid = n_valid // 2
                     if n_valid % 2 == 1:
-                        target[b, yy, x] = np.int32(2) * np.int32(values[mid])
+                        target[slot, yy, x] = np.int32(2) * np.int32(values[mid])
                     else:
-                        target[b, yy, x] = np.int32(values[mid - 1]) + np.int32(
+                        target[slot, yy, x] = np.int32(values[mid - 1]) + np.int32(
                             values[mid]
                         )
 
@@ -537,9 +567,12 @@ def _veto_first_axis0_u16(
                         chosen = s
                         break
                     excess = int64_max
-                    for b in range(n_bands):
+                    for k in range(n_detect):
+                        slot = detect_slots[k]
+                        b = median_bands[slot]
                         e = np.int64(
-                            np.int32(2) * np.int32(stack[s, b, y, x]) - target[b, yy, x]
+                            np.int32(2) * np.int32(stack[s, b, y, x])
+                            - target[slot, yy, x]
                         )
                         if e < excess:
                             excess = e
@@ -549,6 +582,24 @@ def _veto_first_axis0_u16(
                     if excess <= threshold2:
                         chosen = s
                         break
+                    # Snow reads as a bright outlier in the visible bands but
+                    # drops below the median in SWIR, where cloud rises above
+                    # it. One guard band dipping is enough to keep the pixel.
+                    if guard_active:
+                        snow_like = False
+                        for k in range(n_guard):
+                            slot = guard_slots[k]
+                            b = median_bands[slot]
+                            e = np.int64(
+                                np.int32(2) * np.int32(stack[s, b, y, x])
+                                - target[slot, yy, x]
+                            )
+                            if e < guard_floor2:
+                                snow_like = True
+                                break
+                        if snow_like:
+                            chosen = s
+                            break
                     vetoes += 1
                     if vetoes >= max_vetoes:
                         break
@@ -564,6 +615,34 @@ def _veto_first_axis0_u16(
     return out, out_valid, out_idx, n_vetoed
 
 
+def veto_band_plan(
+    veto_tuning: "VetoTuning", bands: Optional[Sequence[str]], bands_count: int
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.int32]]:
+    """Turn configured band names into the index arrays the kernel wants.
+
+    Returns ``(median_bands, detect_slots, guard_slots)``. ``median_bands``
+    lists the band indices needing a median; the slot arrays index into it.
+    Without a band list the gate falls back to requiring every band, which is
+    the behaviour from before the detection set was configurable.
+    """
+    if bands is None:
+        detect: Tuple[int, ...] = tuple(range(bands_count))
+        guard: Tuple[int, ...] = ()
+    else:
+        detect, guard = veto_tuning.resolve_bands(bands)
+
+    median_bands: List[int] = []
+    for idx in (*detect, *guard):
+        if idx not in median_bands:
+            median_bands.append(idx)
+    slot_of = {band: slot for slot, band in enumerate(median_bands)}
+    return (
+        np.array(median_bands, dtype=np.int32),
+        np.array([slot_of[i] for i in detect], dtype=np.int32),
+        np.array([slot_of[i] for i in guard], dtype=np.int32),
+    )
+
+
 def _warm_veto_first_axis0_u16() -> None:
     """Compile the veto kernel on the main thread before workers start."""
     sample_stack = np.zeros((3, 1, 1, 1), dtype=np.uint16)
@@ -571,7 +650,19 @@ def _warm_veto_first_axis0_u16() -> None:
     sample_stack[1, 0, 0, 0] = 200
     sample_stack[2, 0, 0, 0] = 300
     sample_valid = np.ones((3, 1, 1), dtype=np.bool_)
-    _, _, _, _ = _veto_first_axis0_u16(sample_stack, sample_valid, 500, 3, 4)
+    sample_bands = np.array([0], dtype=np.int32)
+    sample_slots = np.array([0], dtype=np.int32)
+    empty_slots = np.empty(0, dtype=np.int32)
+    _, _, _, _ = _veto_first_axis0_u16(
+        sample_stack, sample_valid, 500, 3, 4,
+        sample_bands, sample_slots, empty_slots, 0,
+    )
+    # The guard branch is a distinct specialization; compile it here too so a
+    # worker thread never pays for it mid-run.
+    _, _, _, _ = _veto_first_axis0_u16(
+        sample_stack, sample_valid, 500, 3, 4,
+        sample_bands, sample_slots, sample_slots, 200,
+    )
 
 
 def _copy_single_scene_tile(
@@ -1088,6 +1179,9 @@ def tile_veto_first(
     max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
     veto_tuning: "VetoTuning",
+    band_plan: Tuple[
+        npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.int32]
+    ],
     band_executor: Optional[Executor] = None,
     include_observation_count: bool = False,
     include_scene_index: bool = False,
@@ -1197,12 +1291,17 @@ def tile_veto_first(
         ):
             break
 
+    median_bands, detect_slots, guard_slots = band_plan
     res, _, best_idx_local, n_vetoed = _veto_first_axis0_u16(
         stack,
         valid,
         veto_tuning.excess_dn,
         veto_tuning.min_observations,
         veto_tuning.max_vetoes_per_pixel,
+        median_bands,
+        detect_slots,
+        guard_slots,
+        veto_tuning.snow_guard_dn,
     )
     if n_vetoed.any():
         logger.debug(
@@ -1343,6 +1442,7 @@ def run_tile_aggregation(
     include_observation_count: bool = False,
     include_scene_index: bool = False,
     veto_tuning: Optional[VetoTuning] = None,
+    bands: Optional[Sequence[str]] = None,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
@@ -1397,6 +1497,7 @@ def run_tile_aggregation(
         include_observation_count=include_observation_count,
         include_scene_index=include_scene_index,
         veto_tuning=veto_tuning,
+        bands=bands,
     ):
         r, c, h, w = spec
         out[:, r : r + h, c : c + w] = tile_data
@@ -1485,6 +1586,7 @@ def iter_tile_aggregation(
     include_observation_count: bool = False,
     include_scene_index: bool = False,
     veto_tuning: Optional[VetoTuning] = None,
+    bands: Optional[Sequence[str]] = None,
 ) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
     """Yield aggregated output tiles without allocating the full mosaic.
 
@@ -1618,6 +1720,17 @@ def iter_tile_aggregation(
         effective_veto_tuning = (
             veto_tuning if veto_tuning is not None else DEFAULT_VETO_TUNING
         )
+        # Resolved once here rather than per tile: the mapping is fixed for
+        # the run, and a bad band name should fail before any tile is read.
+        veto_band_plan_arrays = veto_band_plan(
+            effective_veto_tuning, bands, bands_count
+        )
+        logger.debug(
+            "veto_first gate: median bands %s, detect slots %s, guard slots %s",
+            veto_band_plan_arrays[0].tolist(),
+            veto_band_plan_arrays[1].tolist(),
+            veto_band_plan_arrays[2].tolist(),
+        )
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -1632,6 +1745,7 @@ def iter_tile_aggregation(
                 max_observations,
                 out_dtype,
                 effective_veto_tuning,
+                veto_band_plan_arrays,
                 band_executor,
                 include_observation_count,
                 include_scene_index,
@@ -1771,6 +1885,7 @@ def write_tile_aggregation_geotiff(
                     min_tile_size=min_tile_size,
                     include_observation_count=include_observation_count,
                     veto_tuning=veto_tuning,
+                    bands=bands,
                 ):
                     r, c, h, w = spec
                     if output_coverage_mask is not None:
