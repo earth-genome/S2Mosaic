@@ -509,7 +509,6 @@ def stream_mosaic_pipeline(
             include_observation_count=include_observation_count,
             include_scene_index=include_scene_index,
             veto_tuning=veto_tuning,
-            bands=bands,
         )
         return out, last_profile, dropped_scenes
     finally:

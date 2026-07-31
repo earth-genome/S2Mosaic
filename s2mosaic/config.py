@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from shapely.geometry.polygon import Polygon
@@ -91,34 +91,14 @@ class VetoTuning:
     across the whole tile to fix a defect occupying a fraction of a percent.
 
     Attributes:
-        excess_dn: Reject a candidate when its *minimum* excess over the
-            per-band median across valid observations, taken across
-            ``detect_bands``, exceeds this many DN. In c1-l2a scaling
-            (reflectance x 10000) 500 DN is 0.05 reflectance.
-        detect_bands: Bands that must *all* sit above the median for the gate
-            to fire, or ``None`` to require unanimity across every requested
-            band. Unanimity across all bands sounds like the safe choice but
-            is close to inert against thin haze: haze scatters strongly in the
-            blue and barely at all in the SWIR, so the SWIR excess pins the
-            minimum near zero however obvious the haze looks. Narrowing the
-            set to the bands the contaminant actually brightens is what makes
-            the threshold mean what it says.
-
-            Restricting the set costs less discrimination than it appears to,
-            because the comparison is against the pixel's *own* temporal
-            median. Persistently bright ground is bright in the median too and
-            shows no excess, so the gate never sees it. Only transient
-            brightening is exposed, which is the target.
-        snow_guard_bands: Bands checked to spare snow from the gate, or
-            ``None`` to disable. Snow is the one transient brightening that a
-            visible-band rule cannot separate from cloud on amplitude alone,
-            but it separates cleanly on shape: ice absorbs at 1.6 and 2.2 um,
-            so snow sits *below* the median in SWIR while cloud sits above it.
-        snow_guard_dn: How far below the median a guard band must fall for the
-            candidate to read as snow and be kept. ``0`` disables the guard.
-            The test is deliberately loose — any one guard band dipping this
-            far is enough — since wrongly vetoing snow costs real coverage
-            while wrongly keeping it costs one hazy pixel.
+        excess_dn: Reject a candidate when its *minimum* per-band excess over
+            the per-band median across valid observations exceeds this many
+            DN. Requiring every band to be elevated is what keeps legitimate
+            bright ground out of the gate: cloud raises all bands together,
+            while bare soil raises the visible bands but *lowers* NIR
+            relative to vegetation, and snow raises everything except SWIR.
+            In c1-l2a scaling (reflectance x 10000) 500 DN is 0.05
+            reflectance, roughly the point where thin haze becomes visible.
         min_observations: Minimum valid observations at a pixel before the
             gate may fire. With two observations the median is their midpoint
             and the brighter one always shows half the gap as excess, which
@@ -132,9 +112,6 @@ class VetoTuning:
     excess_dn: int = 500
     min_observations: int = 3
     max_vetoes_per_pixel: int = 4
-    detect_bands: Optional[Tuple[str, ...]] = None
-    snow_guard_bands: Optional[Tuple[str, ...]] = None
-    snow_guard_dn: int = 0
 
     def validate(self) -> None:
         if self.excess_dn <= 0:
@@ -147,45 +124,6 @@ class VetoTuning:
             raise ValueError(
                 f"max_vetoes_per_pixel must be >= 1, got {self.max_vetoes_per_pixel}"
             )
-        if self.detect_bands is not None and not self.detect_bands:
-            raise ValueError("detect_bands must be non-empty when provided")
-        if self.snow_guard_dn < 0:
-            raise ValueError(
-                f"snow_guard_dn must be >= 0, got {self.snow_guard_dn}"
-            )
-        if self.snow_guard_dn > 0 and not self.snow_guard_bands:
-            raise ValueError(
-                "snow_guard_dn requires snow_guard_bands to be set"
-            )
-
-    def resolve_bands(self, bands: Sequence[str]) -> Tuple[Tuple[int, ...], ...]:
-        """Map the configured band names onto positions in ``bands``.
-
-        Returns ``(detect_indices, guard_indices)`` as offsets into the
-        requested band list, which is the axis order of the scene stack.
-        """
-        available = list(bands)
-
-        def to_indices(names: Optional[Tuple[str, ...]], role: str) -> Tuple[int, ...]:
-            if not names:
-                return ()
-            missing = [n for n in names if n not in available]
-            if missing:
-                raise ValueError(
-                    f"veto_tuning.{role} refers to bands not requested: "
-                    f"{missing}. Requested bands: {available}"
-                )
-            return tuple(available.index(n) for n in names)
-
-        detect = to_indices(self.detect_bands, "detect_bands")
-        if not detect:
-            detect = tuple(range(len(available)))
-        guard = (
-            to_indices(self.snow_guard_bands, "snow_guard_bands")
-            if self.snow_guard_dn > 0
-            else ()
-        )
-        return detect, guard
 
 
 DEFAULT_VETO_TUNING = VetoTuning()
