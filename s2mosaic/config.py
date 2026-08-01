@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+from shapely.geometry import MultiPolygon
 from shapely.geometry.polygon import Polygon
 
 from .geometry import Aoi, Bbox
@@ -242,7 +243,7 @@ def validate_inputs(
     max_observations: Optional[int] = None,
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
-    aoi: Optional[Polygon] = None,
+    aoi: Optional[Aoi] = None,
     min_coverage_fraction: Optional[float] = None,
     source: str = SOURCE_MPC,
     include_observation_count: bool = False,
@@ -269,12 +270,12 @@ def validate_inputs(
     # grid_id format validation happens in MosaicRequest.normalized() via
     # normalize_grid_id; by the time we get here it's been normalized.
     if aoi is not None:
-        if not isinstance(aoi, Polygon):
-            raise ValueError("aoi must be a single shapely Polygon")
+        if not isinstance(aoi, (Polygon, MultiPolygon)):
+            raise ValueError("aoi must be a shapely Polygon or MultiPolygon")
         if aoi.is_empty:
             raise ValueError("aoi must not be empty")
         if not aoi.is_valid:
-            raise ValueError("aoi must be a valid Polygon")
+            raise ValueError("aoi must be a valid Polygon or MultiPolygon")
         if aoi.area <= 0:
             raise ValueError("aoi must have a positive area")
 

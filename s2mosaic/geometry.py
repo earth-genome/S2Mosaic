@@ -14,7 +14,7 @@ from shapely.ops import transform as shapely_transform
 from ._types import SceneWindow
 
 Bbox = Tuple[float, float, float, float]
-Aoi: TypeAlias = Polygon
+Aoi: TypeAlias = Polygon | MultiPolygon
 
 
 def pick_utm_epsg(lon: float, lat: float) -> int:
@@ -41,13 +41,13 @@ def reproject_bbox(bbox: Bbox, src_epsg: int, dst_epsg: int) -> Bbox:
 
 
 def reproject_aoi(aoi: Aoi, src_epsg: int, dst_epsg: int) -> Aoi:
-    """Reproject a polygon AOI between CRSes."""
+    """Reproject a polygon / multipolygon AOI between CRSes."""
     if src_epsg == dst_epsg:
         return aoi
     transformer = Transformer.from_crs(src_epsg, dst_epsg, always_xy=True)
     reprojected = shapely_transform(transformer.transform, aoi)
-    if not isinstance(reprojected, Polygon):
-        raise ValueError("aoi must reproject to a single Polygon")
+    if not isinstance(reprojected, (Polygon, MultiPolygon)):
+        raise ValueError("aoi must reproject to a Polygon or MultiPolygon")
     return cast(Aoi, reprojected)
 
 
@@ -122,7 +122,7 @@ def _rasterize_aoi_mask(
     width: int,
     height: int,
 ) -> npt.NDArray[np.bool_]:
-    """Rasterize a polygon AOI onto a target grid."""
+    """Rasterize a polygon / multipolygon AOI onto a target grid."""
     minx, _, _, maxy = bounds_target
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
     mask = rasterize(

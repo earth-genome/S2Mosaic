@@ -207,7 +207,7 @@ def mosaic(
         bounds (Tuple[float, float, float, float], optional): Arbitrary AOI
             rectangle as ``(minx, miny, maxx, maxy)`` in ``input_crs``.
             Mutually exclusive with ``grid_id``.
-        aoi (Polygon, optional): Single polygon AOI in ``input_crs``.
+        aoi (Polygon or MultiPolygon, optional): AOI in ``input_crs``.
             Mutually exclusive with ``grid_id`` and ``bounds``.
         input_crs (int, optional): EPSG code of ``bounds`` or ``aoi``.
             Defaults to 4326. Only used in bounds/AOI mode.
