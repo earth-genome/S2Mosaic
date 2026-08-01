@@ -1300,3 +1300,96 @@ class TestBoundsOcmContext:
         assert dropped == []
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings == []
+
+
+class TestBoundsSceneIndexProvenance:
+    """Bounds pipeline must plumb scene-index / return_scene_items like grid."""
+
+    class FakeItem:
+        id = "fake-scene"
+        datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        bbox = (-90.0, -45.0, 90.0, 45.0)
+        properties = {
+            "s2:nodata_pixel_percentage": 0.0,
+            "s2:high_proba_clouds_percentage": 0.0,
+            "s2:cloud_shadow_percentage": 0.0,
+            "sat:relative_orbit": 1,
+        }
+        assets = {
+            "B04": object(),
+            "B03": object(),
+            "B02": object(),
+            "SCL": object(),
+        }
+
+    def test_bounds_returns_scene_index_band_and_items(self, monkeypatch):
+        import s2mosaic.pipelines.bounds as bounds_mod
+
+        aggregation_calls = []
+        item = self.FakeItem()
+
+        monkeypatch.setattr(
+            bounds_mod,
+            "_search_for_items_by_bbox",
+            lambda **_: [item],
+        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+
+        def fake_run_tile_aggregation(**kwargs):
+            aggregation_calls.append(kwargs)
+            h, w = kwargs["height"], kwargs["width"]
+            bands = kwargs["bands_count"]
+            # Spectral + observation count + scene index
+            out = np.zeros((bands + 2, h, w), dtype=np.int32)
+            out[:bands] = 1000
+            out[bands] = 1
+            out[bands + 1] = 0
+            return out
+
+        monkeypatch.setattr(
+            bounds_mod, "run_tile_aggregation", fake_run_tile_aggregation
+        )
+
+        arr, profile, scene_items = run_bounds_for_test(
+            bounds_mod,
+            bounds=(114.80, -32.35, 115.20, -31.75),
+            input_crs=4326,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            bands=["B04", "B03", "B02"],
+            cloud_mask="SCL",
+            mosaic_method="first",
+            include_observation_count=True,
+            include_scene_index=True,
+            return_scene_items=True,
+            min_coverage_fraction=None,
+            resolution=160,
+            adaptive_tiling=False,
+        )
+
+        assert len(aggregation_calls) == 1
+        assert aggregation_calls[0]["include_scene_index"] is True
+        assert arr.shape[0] == 5  # 3 spectral + obs count + scene index
+        assert profile["count"] == 5
+        assert profile["dtype"] == np.dtype(np.int32)
+        assert len(scene_items) == 1
+        assert scene_items[0].id == "fake-scene"
+        assert (arr[-1] == 0).all()

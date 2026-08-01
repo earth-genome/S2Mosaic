@@ -578,7 +578,11 @@ def run_bounds_pipeline(
     request: MosaicRequest,
     *,
     source: Source,
-) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
+) -> Union[
+    Tuple[npt.NDArray[Any], Dict[str, Any]],
+    Tuple[npt.NDArray[Any], Dict[str, Any], List[Any]],
+    Path,
+]:
     """Bounds/AOI-mode pipeline. Called from :func:`s2mosaic.mosaic` for non-grid AOIs.
 
     Searches the configured STAC source for Sentinel-2 L2A scenes intersecting
@@ -600,8 +604,13 @@ def run_bounds_pipeline(
 
     Returns:
         ``(array, profile)`` if no export path is requested, otherwise the
-        ``Path`` of the written GeoTIFF. ``array`` has shape
-        ``(bands, height, width)`` and dtype ``uint8`` (visual) or ``uint16``.
+        ``Path`` of the written GeoTIFF. When ``return_scene_items`` is true and
+        no export path is requested, returns
+        ``(array, profile, scene_items)`` where ``scene_items`` is the kept
+        scene list that ``include_scene_index`` band values index into.
+        ``array`` has shape ``(bands, height, width)`` and dtype ``uint8``
+        (visual) or ``uint16`` (promoted when observation-count / scene-index
+        bands are requested).
 
     Raises:
         ValueError: If no scenes are found for the requested AOI / date window.
@@ -932,16 +941,23 @@ def run_bounds_pipeline(
         h,
         w,
     )
+    out_dtype = np.dtype(np.uint8) if is_visual else np.dtype(np.uint16)
+    output_dtype: np.dtype[Any] = out_dtype
+    if request.include_observation_count:
+        output_dtype = np.promote_types(output_dtype, np.dtype(np.uint16))
+    if request.include_scene_index:
+        output_dtype = np.promote_types(output_dtype, np.dtype(np.int32))
+    output_bands_count = (
+        n_bands
+        + (1 if request.include_observation_count else 0)
+        + (1 if request.include_scene_index else 0)
+    )
     profile: Dict[str, Any] = {
         "driver": "GTiff",
-        "dtype": (
-            np.dtype(np.uint16)
-            if request.include_observation_count
-            else (np.dtype(np.uint8) if is_visual else np.dtype(np.uint16))
-        ),
+        "dtype": output_dtype,
         "width": w,
         "height": h,
-        "count": n_bands + (1 if request.include_observation_count else 0),
+        "count": output_bands_count,
         "crs": CRS.from_epsg(target_crs),
         "transform": user_transform,
     }
@@ -989,7 +1005,7 @@ def run_bounds_pipeline(
                 percentile=request.percentile,
                 tile_size=tile_size,
                 tile_workers=request.tile_workers,
-                out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+                out_dtype=out_dtype,
                 adaptive_tiling=adaptive_tiling,
                 show_progress=request.show_progress,
                 min_tile_size=min_tile_size,
@@ -1011,21 +1027,31 @@ def run_bounds_pipeline(
             percentile=request.percentile,
             tile_size=tile_size,
             tile_workers=request.tile_workers,
-            out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+            out_dtype=out_dtype,
             adaptive_tiling=adaptive_tiling,
             show_progress=request.show_progress,
             min_tile_size=min_tile_size,
             include_observation_count=request.include_observation_count,
+            include_scene_index=request.include_scene_index,
         )
 
-        return finalize_output(
+        finalized = finalize_output(
             array=output_array,
             profile=profile,
             bands=bands,
             coverage_mask=output_coverage_mask,
             export_path=export_path,
             include_observation_count=request.include_observation_count,
+            include_scene_index=request.include_scene_index,
         )
+        if request.return_scene_items:
+            # ``kept_items`` is the dense scene list fed to aggregation;
+            # ``include_scene_index`` band values reference positions in that
+            # list (-1 = no candidate).
+            assert isinstance(finalized, tuple)
+            arr, prof = finalized
+            return arr, prof, list(kept_items)
+        return finalized
     finally:
         close = getattr(read_fn, "close", None)
         if close is not None:
