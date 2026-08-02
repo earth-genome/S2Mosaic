@@ -39,6 +39,7 @@ def mosaic(
     source: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
+    first_coverage_target: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
     scene_sort_fn: Optional[Callable[..., Any]] = ...,
@@ -83,6 +84,7 @@ def mosaic(
     source: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
+    first_coverage_target: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
     scene_sort_fn: Optional[Callable[..., Any]] = ...,
@@ -127,6 +129,7 @@ def mosaic(
     source: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
+    first_coverage_target: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
     scene_sort_fn: Optional[Callable[..., Any]] = ...,
@@ -170,6 +173,7 @@ def mosaic(
     source: str = SOURCE_MPC,
     additional_query: Optional[Dict[str, Any]] = None,
     min_coverage_fraction: Optional[float] = None,
+    first_coverage_target: Optional[float] = None,
     ignore_duplicate_items: bool = True,
     scene_order: str = "valid_data",
     scene_sort_fn: Optional[Callable[..., Any]] = None,
@@ -261,6 +265,12 @@ def mosaic(
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to None.
+        first_coverage_target (float, optional): Early-stop target for
+            ``mosaic_method="first"``, as a fraction in (0, 1] of in-coverage
+            pixels. Phase 1 stops fetching cloud masks once the running
+            composite reaches it, leaving the shortfall as nodata. Defaults to
+            None, which requires every in-coverage pixel to be filled — a bar
+            cloudy scenes rarely clear, so the stop seldom fires.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
         scene_order (str, optional): Scene ordering. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
         scene_sort_fn (Callable, optional): Custom sorting function. If provided, overrides scene_order.
@@ -361,6 +371,7 @@ def mosaic(
         source=source,
         additional_query=additional_query,
         min_coverage_fraction=min_coverage_fraction,
+        first_coverage_target=first_coverage_target,
         ignore_duplicate_items=ignore_duplicate_items,
         scene_order=scene_order,
         scene_sort_fn=scene_sort_fn,

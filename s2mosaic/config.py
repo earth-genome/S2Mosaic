@@ -122,6 +122,7 @@ class MosaicRequest:
     source: str = SOURCE_MPC
     additional_query: Optional[Dict[str, Any]] = None
     min_coverage_fraction: Optional[float] = None
+    first_coverage_target: Optional[float] = None
     ignore_duplicate_items: bool = True
     scene_order: str = SCENE_ORDER_VALID_DATA
     scene_sort_fn: Optional[Callable[..., Any]] = None
@@ -189,6 +190,7 @@ class MosaicRequest:
             tile_workers=self.tile_workers,
             adaptive_tiling=self.adaptive_tiling,
             min_coverage_fraction=self.min_coverage_fraction,
+            first_coverage_target=self.first_coverage_target,
             source=self.source,
             include_observation_count=self.include_observation_count,
             include_scene_index=self.include_scene_index,
@@ -245,6 +247,7 @@ def validate_inputs(
     adaptive_tiling: bool = True,
     aoi: Optional[Aoi] = None,
     min_coverage_fraction: Optional[float] = None,
+    first_coverage_target: Optional[float] = None,
     source: str = SOURCE_MPC,
     include_observation_count: bool = False,
     include_scene_index: bool = False,
@@ -310,6 +313,17 @@ def validate_inputs(
             f"min_coverage_fraction must be between 0 and 1 or None, "
             f"got {min_coverage_fraction}"
         )
+    if first_coverage_target is not None:
+        if not (0.0 < first_coverage_target <= 1.0):
+            raise ValueError(
+                f"first_coverage_target must be in (0, 1] or None, "
+                f"got {first_coverage_target}"
+            )
+        if mosaic_method != MOSAIC_FIRST:
+            raise ValueError(
+                "first_coverage_target only applies to mosaic_method='first', "
+                f"got {mosaic_method!r}"
+            )
     if min_observations is not None:
         if (
             isinstance(min_observations, bool)

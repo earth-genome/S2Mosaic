@@ -19,6 +19,7 @@ from ..helpers import (
     SceneFetchError,
     define_dates,
     filter_scene_dataframe,
+    first_stop_reached,
     get_band_template,
     pick_ocm_resolution,
     report_dropped_scenes,
@@ -182,6 +183,7 @@ def run_grid_pipeline(
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,
         mosaic_method=request.mosaic_method,
+        first_coverage_target=request.first_coverage_target,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
         ocm_tuning=request.ocm_tuning,
@@ -235,6 +237,7 @@ def stream_mosaic_pipeline(
     export_path: Optional[Path] = None,
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
+    first_coverage_target: Optional[float] = None,
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "fp32",
     ocm_tuning: Optional[OcmTuning] = None,
@@ -260,7 +263,8 @@ def stream_mosaic_pipeline(
     ``min_observations`` is an optional per-tile early-stop target for
     ``mean`` and ``percentile``: each tile walks scenes in priority order and
     stops once every coverable pixel has at least that many valid observations.
-    ``first`` always stops once every coverable pixel has its first observation.
+    ``first`` stops once every coverable pixel has its first observation, or
+    once ``first_coverage_target`` (a fraction of in-coverage pixels) is met.
     """
     if source is None:
         from ..sources import AWS
@@ -332,17 +336,19 @@ def stream_mosaic_pipeline(
 
     try:
         for scene_position in range(n_scenes):
-            if (
-                mosaic_method == MOSAIC_FIRST
-                and (good_pixel_tracker | ~coverage_mask).all()
-            ):
-                logger.info(
-                    "All in-coverage pixels filled after %d/%d scenes — "
-                    "skipping remaining cloud-mask fetches",
-                    scene_position,
-                    n_scenes,
+            if mosaic_method == MOSAIC_FIRST:
+                stop, covered = first_stop_reached(
+                    good_pixel_tracker, coverage_mask, first_coverage_target
                 )
-                break
+                if stop:
+                    logger.info(
+                        "In-coverage pixels %.4f%% filled after %d/%d scenes — "
+                        "skipping remaining cloud-mask fetches",
+                        covered * 100,
+                        scene_position,
+                        n_scenes,
+                    )
+                    break
             try:
                 scene_idx, combo_result = next(mask_iter)
             except StopIteration:

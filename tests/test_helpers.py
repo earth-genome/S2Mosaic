@@ -4,11 +4,14 @@ import logging
 import pytest
 from rasterio.errors import RasterioIOError
 
+import numpy as np
+
 from s2mosaic.helpers import (
     SceneFetchError,
     SceneMissingAssets,
     ensure_item_assets,
     filter_scene_dataframe,
+    first_stop_reached,
     missing_item_assets,
     normalize_grid_id,
     partition_items_by_required_assets,
@@ -280,3 +283,47 @@ class TestSceneAssetValidation:
         item = self.FakeItem("bad", {"green": self.FakeAsset()})
         with pytest.raises(SceneMissingAssets, match="missing STAC assets: red"):
             ensure_item_assets(item, AWS, ["B04", "B03", "B8A"])
+
+
+class TestFirstStopReached:
+    """Early-stop gate for ``mosaic_method="first"``."""
+
+    @staticmethod
+    def _masks(coverable: int, filled: int, size: int = 10):
+        coverage = np.zeros(size * size, dtype=bool)
+        coverage[:coverable] = True
+        tracker = np.zeros(size * size, dtype=bool)
+        tracker[:filled] = True
+        return tracker.reshape(size, size), coverage.reshape(size, size)
+
+    def test_no_target_requires_every_in_coverage_pixel(self):
+        tracker, coverage = self._masks(coverable=50, filled=49)
+        stop, covered = first_stop_reached(tracker, coverage)
+        assert stop is False
+        assert covered == pytest.approx(0.98)
+
+    def test_no_target_stops_when_fully_filled(self):
+        tracker, coverage = self._masks(coverable=50, filled=50)
+        assert first_stop_reached(tracker, coverage) == (True, 1.0)
+
+    def test_target_stops_below_full_coverage(self):
+        tracker, coverage = self._masks(coverable=50, filled=49)
+        stop, covered = first_stop_reached(tracker, coverage, 0.95)
+        assert stop is True
+        assert covered == pytest.approx(0.98)
+
+    def test_target_not_yet_met(self):
+        tracker, coverage = self._masks(coverable=50, filled=49)
+        assert first_stop_reached(tracker, coverage, 0.99)[0] is False
+
+    def test_pixels_outside_coverage_do_not_count(self):
+        coverage = np.zeros((10, 10), dtype=bool)
+        coverage[0] = True
+        tracker = np.zeros((10, 10), dtype=bool)
+        tracker[1:] = True
+        assert first_stop_reached(tracker, coverage, 0.5) == (False, 0.0)
+
+    def test_empty_coverage_stops_immediately(self):
+        coverage = np.zeros((10, 10), dtype=bool)
+        tracker = np.zeros((10, 10), dtype=bool)
+        assert first_stop_reached(tracker, coverage) == (True, 1.0)

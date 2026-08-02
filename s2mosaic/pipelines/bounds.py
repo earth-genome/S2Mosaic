@@ -42,6 +42,7 @@ from ..helpers import (
     SceneFetchError,
     SceneNoOverlap,
     define_dates,
+    first_stop_reached,
     get_band_template,
     get_rasterio_resampling,
     partition_items_by_required_assets,
@@ -359,6 +360,7 @@ def _stream_bounds_combo_masks(
     coverage_mask: npt.NDArray[Any],
     cloud_mask: str,
     mosaic_method: str,
+    first_coverage_target: Optional[float] = None,
     tile_workers: Optional[int],
     ocm_batch_size: int,
     ocm_inference_dtype: str,
@@ -461,17 +463,18 @@ def _stream_bounds_combo_masks(
 
     try:
         for scene_position in range(n_time):
-            # FIRST mode: stop scanning once everything in coverage is filled.
-            if (
-                mosaic_method == MOSAIC_FIRST
-                and (good_pixel_tracker | ~coverage_mask).all()
-            ):
-                logger.info(
-                    "All in-coverage pixels filled after "
-                    f"{scene_position}/{n_time} scenes — "
-                    "skipping remaining cloud-mask fetches"
+            # FIRST mode: stop scanning once coverage is filled (or on target).
+            if mosaic_method == MOSAIC_FIRST:
+                stop, covered = first_stop_reached(
+                    good_pixel_tracker, coverage_mask, first_coverage_target
                 )
-                break
+                if stop:
+                    logger.info(
+                        f"In-coverage pixels {covered * 100:.4f}% filled after "
+                        f"{scene_position}/{n_time} scenes — "
+                        "skipping remaining cloud-mask fetches"
+                    )
+                    break
 
             try:
                 assert mask_fetch_iter is not None
@@ -837,6 +840,7 @@ def run_bounds_pipeline(
         coverage_mask=coverage_mask_ocm,
         cloud_mask=request.cloud_mask,
         mosaic_method=request.mosaic_method,
+        first_coverage_target=request.first_coverage_target,
         tile_workers=request.tile_workers,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,

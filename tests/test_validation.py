@@ -278,6 +278,33 @@ class TestMosaicSharedParamsValidation:
 
     BOUNDS = (115.83, -31.97, 115.91, -31.94)
 
+    def test_first_coverage_target_rejects_out_of_range(self):
+        with pytest.raises(ValueError, match="first_coverage_target"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                mosaic_method="first",
+                first_coverage_target=1.5,
+            )
+
+    def test_first_coverage_target_rejects_zero(self):
+        with pytest.raises(ValueError, match="first_coverage_target"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                mosaic_method="first",
+                first_coverage_target=0.0,
+            )
+
+    def test_first_coverage_target_requires_first_method(self):
+        with pytest.raises(ValueError, match="only applies to mosaic_method"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                mosaic_method="mean",
+                first_coverage_target=0.99,
+            )
+
     def test_grid_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
             mosaic(grid_id="50HMH", start_year=2023, bands=["FOO"])

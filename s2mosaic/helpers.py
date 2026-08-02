@@ -16,6 +16,8 @@ from typing import (
     TypeVar,
 )
 
+import numpy as np
+import numpy.typing as npt
 from dateutil.relativedelta import relativedelta
 from rasterio.errors import RasterioIOError
 from urllib3.exceptions import HTTPError
@@ -26,6 +28,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def first_stop_reached(
+    good_pixel_tracker: "npt.NDArray[Any]",
+    coverage_mask: "npt.NDArray[Any]",
+    first_coverage_target: Optional[float] = None,
+) -> Tuple[bool, float]:
+    """Whether ``first`` may stop fetching masks, and the coverage reached.
+
+    With no target the stop requires *every* in-coverage pixel to be filled.
+    Real scenes rarely clear that bar — a handful of pixels stay cloudy in
+    every candidate — so the stop almost never fires and ``first`` walks the
+    whole ranked candidate list. A ``first_coverage_target`` in (0, 1] stops
+    once that fraction of in-coverage pixels is filled, trading a little
+    nodata for skipped cloud-mask fetches and scene reads.
+
+    Both masks must be boolean and share a shape.
+    """
+    coverable = int(coverage_mask.sum())
+    if coverable == 0:
+        return True, 1.0
+    filled = int(np.count_nonzero(good_pixel_tracker & coverage_mask))
+    fraction = filled / coverable
+    if first_coverage_target is None:
+        return filled == coverable, fraction
+    return fraction >= first_coverage_target, fraction
 
 
 class SceneFetchError(Exception):
