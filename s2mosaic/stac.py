@@ -26,7 +26,10 @@ DATETIME_COL = "datetime"
 # Element 84's Earth Search v1 drops ``sat:relative_orbit`` and
 # ``s2:mgrs_tile`` from item properties. The orbit number is embedded in the
 # product URI (``..._R060_...``) and the tile lives in ``grid:code``
-# (``MGRS-50HMH``); these helpers recover both with property fallbacks first.
+# (``MGRS-50HMH`` / ``MGRS-09WXN``); these helpers recover both with property
+# fallbacks first. ``grid:code`` zero-pads single-digit UTM zones; s2mosaic
+# ``grid_id`` / ``normalize_grid_id`` reject that leading zero, so extraction
+# must canonicalize to the unpadded form before the post-filter compares.
 _PRODUCT_URI_ORBIT_RE = re.compile(r"_R(\d+)_")
 
 
@@ -38,13 +41,38 @@ def _extract_relative_orbit(props: Dict[str, Any]) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _canonical_mgrs_tile(tile: str) -> str:
+    """Normalize an MGRS tile id to s2mosaic ``grid_id`` form.
+
+    Strips a leading zero from single-digit UTM zones (``09WXN`` → ``9WXN``)
+    so Earth Search ``grid:code`` values match ``normalize_grid_id`` output.
+    Zones 10–60 are unchanged.
+    """
+    tile = tile.strip().upper()
+    if len(tile) >= 4 and tile[0] == "0" and tile[1].isdigit():
+        return tile[1:]
+    return tile
+
+
 def _extract_mgrs_tile(props: Dict[str, Any]) -> Optional[str]:
-    if "s2:mgrs_tile" in props:
-        return str(props["s2:mgrs_tile"])
-    grid_code = props.get("grid:code")
-    if isinstance(grid_code, str) and grid_code.startswith("MGRS-"):
-        return grid_code[len("MGRS-") :]
-    return None
+    # Prefer structured MGRS fields: ``mgrs:utm_zone`` is numeric, so zone 9
+    # naturally becomes ``9WXN`` and matches s2mosaic ``grid_id``.
+    zone = props.get("mgrs:utm_zone")
+    band = props.get("mgrs:latitude_band")
+    square = props.get("mgrs:grid_square")
+    if zone is not None and band and square:
+        return f"{int(zone)}{band}{square}"
+
+    raw: Optional[str] = None
+    if props.get("s2:mgrs_tile") is not None:
+        raw = str(props["s2:mgrs_tile"])
+    else:
+        grid_code = props.get("grid:code")
+        if isinstance(grid_code, str) and grid_code.startswith("MGRS-"):
+            raw = grid_code[len("MGRS-") :]
+    if raw is None:
+        return None
+    return _canonical_mgrs_tile(raw)
 
 
 def add_item_info(items: ItemCollection) -> DataFrame:

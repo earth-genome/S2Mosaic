@@ -302,6 +302,29 @@ class TestStacPropertyFallbacks:
         assert _extract_mgrs_tile({}) is None
         assert _extract_mgrs_tile({"grid:code": "garbled"}) is None
 
+    def test_mgrs_tile_canonicalizes_zero_padded_zone(self):
+        """Earth Search zero-pads zones 1–9; s2mosaic grid_id does not."""
+        from s2mosaic.stac import _canonical_mgrs_tile, _extract_mgrs_tile
+
+        assert _canonical_mgrs_tile("09WXN") == "9WXN"
+        assert _canonical_mgrs_tile("9WXN") == "9WXN"
+        assert _canonical_mgrs_tile("50HMH") == "50HMH"
+        # Structured fields win and naturally drop padding via int(zone).
+        assert (
+            _extract_mgrs_tile(
+                {
+                    "mgrs:utm_zone": 9,
+                    "mgrs:latitude_band": "W",
+                    "mgrs:grid_square": "XN",
+                    "grid:code": "MGRS-09WXN",
+                }
+            )
+            == "9WXN"
+        )
+        # grid:code alone must still match normalize_grid_id / grid_id form.
+        assert _extract_mgrs_tile({"grid:code": "MGRS-09WXN"}) == "9WXN"
+        assert _extract_mgrs_tile({"s2:mgrs_tile": "05VLC"}) == "5VLC"
+
 
 class TestAddItemInfoOnAwsShapedItems:
     """add_item_info() must populate orbit and good_data_pct from AWS-style props."""
@@ -395,6 +418,47 @@ class TestSearchPostFilter:
         )
         kept_ids = [it.id for it in items]
         assert kept_ids == ["S2A_50HMH_2023_0_L2A"]
+
+    def test_grid_id_post_filter_keeps_zero_padded_earth_search_tiles(
+        self, monkeypatch
+    ):
+        """Earth Search ``MGRS-09WXN`` must match s2mosaic grid_id ``9WXN``."""
+        import s2mosaic.stac as stac_mod
+        from s2mosaic.sources import AWS
+
+        wanted = self._make_item("S2B_T09WXN_2025_0_L2A", "MGRS-09WXN")
+        neighbour = self._make_item("S2B_T09WXP_2025_0_L2A", "MGRS-09WXP")
+
+        class _FakeSearch:
+            def item_collection(self):
+                from pystac.item_collection import ItemCollection
+
+                return ItemCollection([wanted, neighbour])
+
+        class _FakeCatalog:
+            def search(self, **_):
+                return _FakeSearch()
+
+        import pystac_client
+
+        monkeypatch.setattr(
+            pystac_client.Client,
+            "open",
+            classmethod(lambda cls, *_, **__: _FakeCatalog()),
+        )
+
+        from datetime import date as _date
+
+        items = stac_mod.search_for_items(
+            grid_id="9WXN",
+            start_date=_date(2025, 8, 1),
+            end_date=_date(2026, 8, 1),
+            additional_query={},
+            source=AWS,
+            ignore_duplicate_items=False,
+        )
+        kept_ids = [it.id for it in items]
+        assert kept_ids == ["S2B_T09WXN_2025_0_L2A"]
 
 
 class TestStacDatetimeFormat:
